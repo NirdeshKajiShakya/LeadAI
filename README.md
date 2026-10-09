@@ -25,9 +25,8 @@ https://www.figma.com/design/b1TtQjgqK0SzCqi0mn2wAf/LeadAI?node-id=1-3&t=8JU2KGr
 The functional MERN implementation is split into `frontend/` and `backend/`. The `stitch_ai_kanban_task_manager/` directory now contains only the retained Stitch design components.
 
 ```bash
-cd backend && npm install && npm run dev
-# in another terminal
-cd frontend && npm install && npm run dev
+npm run install:all   # first time only (installs root + backend + frontend)
+npm run dev           # runs backend (:4000) + frontend (:5173) together
 ```
 
 Open `http://localhost:5173`. The API runs on port 4000 and uses the seeded board in memory by default. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` to persist tasks in MongoDB. See `instructions/` for API, environment, and navigation details.
