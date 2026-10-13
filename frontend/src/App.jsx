@@ -23,6 +23,9 @@ function IconButton({ label, children, onClick, active = false }) {
 
 function App() {
   const [pathname, setPathname] = useState(window.location.pathname);
+  const [token, setToken] = useState(() => sessionStorage.getItem('leadai-session'));
+  const [authMode, setAuthMode] = useState('signin');
+  const [authError, setAuthError] = useState('');
   const [tasks, setTasks] = useState([]);
   const [query, setQuery] = useState('');
   const [priority, setPriority] = useState('all');
@@ -40,9 +43,20 @@ function App() {
   useEffect(() => {
     const handlePopState = () => setPathname(window.location.pathname);
     window.addEventListener('popstate', handlePopState);
-    fetch(`${API_BASE_URL}/api/tasks`).then((response) => response.json()).then(setTasks).catch(() => setTasks([])).finally(() => setLoading(false));
+    if (!token) {
+      setLoading(false);
+      return () => window.removeEventListener('popstate', handlePopState);
+    }
+    fetch(`${API_BASE_URL}/api/tasks`, { headers: { Authorization: `Bearer ${token}` } }).then(async (response) => {
+      if (response.status === 401) {
+        sessionStorage.removeItem('leadai-session');
+        setToken(null);
+        return [];
+      }
+      return response.json();
+    }).then(setTasks).catch(() => setTasks([])).finally(() => setLoading(false));
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [token]);
 
   function navigate(path) {
     window.history.pushState({}, '', path);
@@ -61,18 +75,42 @@ function App() {
 
   async function updateTask(key, data) {
     setTasks((current) => current.map((task) => task.key === key ? { ...task, ...data } : task));
-    await fetch(`${API_BASE_URL}/api/tasks/${key}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const response = await fetch(`${API_BASE_URL}/api/tasks/${key}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(data) });
+    if (!response.ok) setTasks((current) => current.map((task) => task.key === key ? { ...task, ...data } : task));
   }
 
   async function createTask(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assignee: form.get('assignee') || 'Unassigned', dueDate: form.get('dueDate') || 'Unscheduled' };
-    const response = await fetch(`${API_BASE_URL}/api/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const response = await fetch(`${API_BASE_URL}/api/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
     const task = await response.json();
+    if (!response.ok) return setAuthError(task.error || 'Could not create task.');
     setTasks((current) => [...current, task]);
     setShowModal(false);
   }
+
+  async function authenticate(event) {
+    event.preventDefault();
+    setAuthError('');
+    const form = new FormData(event.currentTarget);
+    const endpoint = authMode === 'signup' ? '/api/auth/signup' : '/api/auth/signin';
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: form.get('email'), password: form.get('password'), name: form.get('name') })
+    });
+    const payload = await response.json();
+    if (!response.ok) return setAuthError(payload.error || 'Authentication failed.');
+    if (authMode === 'signup') {
+      setAuthMode('signin');
+      return setAuthError('Account created. Sign in to continue.');
+    }
+    sessionStorage.setItem('leadai-session', payload.token);
+    setToken(payload.token);
+  }
+
+  if (!token) return <AuthScreen mode={authMode} setMode={setAuthMode} error={authError} onSubmit={authenticate} />;
 
   function sendCopilot(event) {
     event.preventDefault();
@@ -94,7 +132,7 @@ function App() {
       <div className="workspace-picker"><span className="workspace-dot"></span> Acme Core Sprint <ChevronDown size={13} /></div>
       <div className="topbar-actions">
         <label className="global-search"><Search size={15} /><input placeholder="Search tasks, comments, agents..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <IconButton label="Notifications"><Bell size={16} /></IconButton><button className="text-button" onClick={() => navigate('/signin')}>Sign In</button><button className="signup-button" onClick={() => navigate('/signin')}>Sign Up</button><button className="profile-avatar" onClick={() => navigate('/profile')}>SC<span></span></button>
+        <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); }}>Sign Out</button><button className="profile-avatar" onClick={() => navigate('/profile')}>SC<span></span></button>
       </div>
     </header>
     <div className="workspace-layout">
@@ -119,6 +157,10 @@ function App() {
 }
 
 function NavItem({ icon, label, active, badge, onClick }) { return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{badge && <em>{badge}</em>}</button>; }
+function AuthScreen({ mode, setMode, error, onSubmit }) {
+  const signup = mode === 'signup';
+  return <main className="auth-screen"><div className="auth-panel"><div className="logo-mark"><span></span><span></span><span></span></div><div className="eyebrow">LeadAI workspace</div><h1>{signup ? 'Create your account' : 'Welcome back'}</h1><p>{signup ? 'Start shaping clearer work for your team.' : 'Sign in to continue to your sprint board.'}</p><form onSubmit={onSubmit}>{signup && <label>Name<input name="name" autoComplete="name" maxLength="80" /></label>}<label>Email<input name="email" type="email" autoComplete="email" required /></label><label>Password<input name="password" type="password" minLength="8" maxLength="128" autoComplete={signup ? 'new-password' : 'current-password'} required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button" type="submit">{signup ? 'Create account' : 'Sign in'} <ArrowRight size={15} /></button></form><button className="auth-switch" onClick={() => setMode(signup ? 'signin' : 'signup')}>{signup ? 'Already have an account? Sign in' : 'Need an account? Sign up'}</button></div></main>;
+}
 function Metric({ label, value, dot, icon }) { return <div className="metric"><span>{dot && <i className={`metric-dot ${dot}`}></i>}{icon}{label}</span><strong>{value}</strong></div>; }
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
 function TaskCard({ task, onMove }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> Skill matched to {task.assignee}</div>}<div className="task-footer"><span className="assignee"><i>{avatars[task.assignee] || '?'}</i>{task.assignee}</span><span className="task-meta"><CalendarDays size={13} />{task.dueDate}</span><button className="task-menu" aria-label={`Move ${task.key}`} onClick={() => onMove(task.key, { status: task.status === 'done' ? 'backlog' : 'done' })}><MoreHorizontal size={15} /></button></div></article>; }

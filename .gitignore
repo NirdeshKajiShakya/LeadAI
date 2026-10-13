@@ -1,3 +1,7 @@
 node_modules
 instructions
 stitch_ai_kanban_task_manager
+.freebuff
+.vscode
+backend/uploads
+backend/.env
