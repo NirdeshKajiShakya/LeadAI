@@ -1,10 +1,11 @@
+import dotenv from 'dotenv';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import mongoose from 'mongoose';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { Task } from './models/Task.js';
 import { User } from './models/User.js';
 import {
@@ -14,9 +15,11 @@ import {
   sessions
 } from './auth.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '../.env') });
+
 const app = express();
 const port = Number(process.env.PORT || 4000);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsDir = path.join(__dirname, '../uploads');
 const allowedStatuses = ['backlog', 'todo', 'progress', 'review', 'done'];
 const allowedPriorities = ['urgent', 'high', 'medium', 'low'];

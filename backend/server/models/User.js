@@ -14,6 +14,4 @@ const userSchema = new mongoose.Schema({
   resetTokenExpiresAt: { type: Date }
 }, { timestamps: true });
 
-userSchema.index({ email: 1 });
-
 export const User = mongoose.model('User', userSchema);

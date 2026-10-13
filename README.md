@@ -29,6 +29,6 @@ npm run install:all   # first time only (installs root + backend + frontend)
 npm run dev           # runs backend (:4000) + frontend (:5173) together
 ```
 
-Open `http://localhost:5173`. The API runs on port 4000 and uses the seeded board in memory by default. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` to persist tasks in MongoDB. See `instructions/` for API, environment, and navigation details.
+Open `http://localhost:5173`. The API runs on port 4000. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` to persist tasks and users in MongoDB; if it is omitted the API falls back to seeded in-memory data. The default points at a dedicated local `leadai` database (`mongodb://127.0.0.1:27017/leadai`). To use MongoDB Atlas instead, comment out the local `MONGODB_URI` line in `backend/.env` and uncomment the `mongodb+srv://` line, filling in your credentials. See `instructions/` for API, environment, and navigation details.
 
 The app requires an account. Authentication uses short-lived bearer sessions; sign-up always creates a member account. Task attachments are stored under `backend/uploads/` and are excluded from public static serving. Password reset requests intentionally return the same response for known and unknown email addresses; configure an email delivery adapter before using reset links in production.
