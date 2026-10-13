@@ -43,23 +43,24 @@ app.use((req, res, next) => {
   next();
 });
 
-const seedTasks = [
-  ['KAN-101', 'API rate-limiting middleware', 'backlog', 'low', ['Backend', 'Security'], 'Sarah Chen'],
-  ['KAN-102', 'Multi-tenant database shard migration', 'backlog', 'high', ['Database'], 'Sarah Chen'],
-  ['KAN-103', 'OAuth2 token refresh caching', 'backlog', 'medium', ['Auth'], 'Unassigned'],
-  ['KAN-104', 'Design vector search indexing pipeline', 'todo', 'urgent', ['AI Agent', 'Architecture'], 'Devin Vance'],
-  ['KAN-105', 'Refactor WebSocket event listeners', 'todo', 'high', ['Frontend'], 'Sarah Chen'],
-  ['KAN-108', 'Implement LLM tool-calling fallback', 'progress', 'urgent', ['AI Agent', 'Core'], 'Alex Rivera'],
-  ['KAN-109', 'Dark mode high-contrast audit', 'progress', 'medium', ['Frontend', 'A11y'], 'Sarah Chen'],
-  ['KAN-110', 'Payment webhook reconciliation suite', 'review', 'high', ['Backend', 'CI Passed'], 'Elena Rostova'],
-  ['KAN-112', 'Telemetry span enrichment for gRPC', 'review', 'low', ['DevOps'], 'Elena Rostova'],
-  ['KAN-089', 'Kubernetes cluster autoscaler fine-tuning', 'done', 'low', ['DevOps'], 'Marcus Brody'],
-  ['KAN-092', 'Fix memory leak in SSE stream buffer', 'done', 'medium', ['Bugfix'], 'Alex Rivera']
-].map(([key, title, status, priority, labels, assignee]) => ({
-  key, title, description: '', status, priority, labels, assignee, dueDate: 'Unscheduled',
-  ownerId: null, comments: [], attachments: [], dependencies: []
-}));
-let memoryTasks = seedTasks;
+function starterTasksFor(user) {
+  const name = user?.name && user.name !== user.email ? user.name : 'You';
+  return [
+    { title: 'Welcome to your LeadAI board', status: 'done', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: 'Today', description: 'This board belongs to you. Create, organize, and move tasks however you like.' },
+    { title: 'Create your first task', status: 'todo', priority: 'high', labels: ['Getting Started'], assignee: name, dueDate: 'Today', description: 'Click "Add Task" to capture something you are working on. Try adding a label and a due date.' },
+    { title: 'Drag a card between columns', status: 'todo', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: 'Unscheduled', description: 'Move this card from To Do into In Progress to watch the board update instantly.' },
+    { title: 'Agree on a definition of done', status: 'review', priority: 'medium', labels: ['Process'], assignee: name, dueDate: 'This week', description: 'A clear definition of done keeps completed work consistent across your board.' },
+    { title: 'Invite a teammate to collaborate', status: 'backlog', priority: 'medium', labels: ['Team'], assignee: 'Unassigned', dueDate: 'Unscheduled', description: 'Share your workspace so others can comment on and track shared work.' }
+  ];
+}
+let memoryTasks = [];
+async function seedStarterTasks(user) {
+  for (const template of starterTasksFor(user)) {
+    let key;
+    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+    await store.create({ key, ownerId: String(user._id), ...template, comments: [], attachments: [], dependencies: [] });
+  }
+}
 
 async function connectMongo() {
   if (!process.env.MONGODB_URI) return;
@@ -67,7 +68,6 @@ async function connectMongo() {
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 1500 });
     mongoReady = true;
     setDatabaseReady(true);
-    if (await Task.countDocuments() === 0) await Task.insertMany(seedTasks);
     console.log('MongoDB connected');
   } catch (error) {
     console.warn(`MongoDB unavailable, using in-memory storage: ${error.message}`);
@@ -147,7 +147,11 @@ function blockedTask(task, tasks, seen = new Set()) {
 app.get('/api/health', (_req, res) => res.json({ ok: true, database: mongoReady ? 'mongodb' : 'memory' }));
 
 app.post('/api/auth/signup', async (req, res, next) => {
-  try { res.status(201).json(await createUser(req.body || {})); } catch (error) { next(error); }
+  try {
+    const user = await createUser(req.body || {});
+    await seedStarterTasks(user);
+    res.status(201).json(user);
+  } catch (error) { next(error); }
 });
 app.post('/api/auth/signin', async (req, res, next) => {
   try {
@@ -190,8 +194,11 @@ app.post('/api/auth/reset-password', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.get('/api/tasks', requireAuth, async (_req, res, next) => {
-  try { res.json(await store.list()); } catch (error) { next(error); }
+app.get('/api/tasks', requireAuth, async (req, res, next) => {
+  try {
+    const tasks = await store.list();
+    res.json(tasks.filter((task) => canAccess(task, req)));
+  } catch (error) { next(error); }
 });
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
