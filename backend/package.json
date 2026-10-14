@@ -8,7 +8,11 @@
     "start": "node server/index.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^16.6.1",
     "express": "latest",
-    "mongoose": "latest"
+    "mongoose": "latest",
+    "multer": "^2.4.0"
   }
 }
