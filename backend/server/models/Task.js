@@ -33,6 +33,8 @@ const taskSchema = new mongoose.Schema({
   assignee: { type: String, default: 'Unassigned', maxlength: 120 },
   dueDate: { type: String, default: '', maxlength: 40 },
   aiSuggested: { type: Boolean, default: false },
+  sprintId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sprint', default: null },
+  storyPoints: { type: Number, default: 0, min: 0, max: 100 },
   comments: { type: [commentSchema], default: [] },
   attachments: { type: [attachmentSchema], default: [] },
   dependencies: { type: [dependencySchema], default: [] }

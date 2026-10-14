@@ -7,6 +7,8 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Task } from './models/Task.js';
+import { Sprint } from './models/Sprint.js';
+import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User } from './models/User.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
@@ -25,6 +27,7 @@ const allowedStatuses = ['backlog', 'todo', 'progress', 'review', 'done'];
 const allowedPriorities = ['urgent', 'high', 'medium', 'low'];
 const rateLimits = new Map();
 let mongoReady = false;
+let memorySprints = [];
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(express.json({ limit: '150kb' }));
@@ -61,6 +64,24 @@ function starterTasksFor(user) {
   ];
 }
 let memoryTasks = [];
+function seedSprint(ownerId) {
+  const start = new Date(`${todayIsoDate()}T00:00:00Z`);
+  start.setUTCDate(start.getUTCDate() - 3);
+  const startDate = start.toISOString().slice(0, 10);
+  return {
+    name: 'Q3 Product Engineering Sprint 14',
+    goal: 'Ship the core orchestration engine v2.4 with a working LLM fallback matrix.',
+    startDate,
+    endDate: endDateForStart(startDate),
+    ownerId: String(ownerId),
+    createdAt: new Date()
+  };
+}
+const sprintId = (sprint) => String(sprint._id ?? sprint.id);
+let memorySprintCounter = 0;
+function withSprintId(sprint) {
+  return sprint._id ? sprint : { ...sprint, _id: `mem-sprint-${Date.now()}-${++memorySprintCounter}` };
+}
 async function seedStarterTasks(user) {
   for (const template of starterTasksFor(user)) {
     let key;
@@ -70,7 +91,9 @@ async function seedStarterTasks(user) {
 }
 
 async function connectMongo() {
-  if (!process.env.MONGODB_URI) return;
+  if (!process.env.MONGODB_URI) {
+    return;
+  }
   try {
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 1500 });
     mongoReady = true;
@@ -102,8 +125,54 @@ const store = {
     const before = memoryTasks.length;
     memoryTasks = memoryTasks.filter((task) => task.key !== key);
     return { deletedCount: before - memoryTasks.length };
+  },
+  listBySprint: (id) => mongoReady ? Task.find({ sprintId: id }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.sprintId) === String(id))),
+  listWithoutSprint: () => mongoReady ? Task.find({ sprintId: null }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => !task.sprintId))
+};
+
+const sprintStore = {
+  list: (ownerId) => mongoReady ? Sprint.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memorySprints.filter((sprint) => String(sprint.ownerId) === String(ownerId))),
+  find: (id, ownerId) => mongoReady ? Sprint.findOne({ _id: id, ownerId }).lean() : Promise.resolve(memorySprints.find((sprint) => sprintId(sprint) === String(id) && String(sprint.ownerId) === String(ownerId))),
+  create: async (data) => {
+    if (mongoReady) return new Sprint(data).save();
+    const sprint = withSprintId({ ...data, createdAt: new Date() });
+    memorySprints = [...memorySprints, sprint];
+    return sprint;
+  },
+  update: async (id, ownerId, data) => {
+    if (mongoReady) return Sprint.findOneAndUpdate({ _id: id, ownerId }, { $set: data }, { new: true, runValidators: true }).lean();
+    const current = await sprintStore.find(id, ownerId);
+    if (!current) return null;
+    memorySprints = memorySprints.map((sprint) => sprintId(sprint) === String(id) ? { ...sprint, ...data } : sprint);
+    return sprintStore.find(id, ownerId);
   }
 };
+
+async function ensureDefaultSprint(ownerId) {
+  const existing = await sprintStore.list(ownerId);
+  if (existing.length) return existing[0];
+  return sprintStore.create(seedSprint(ownerId));
+}
+
+function sprintView(sprint, tasks = []) {
+  const progress = summarizeTasks(tasks);
+  const current = computeSprintDay(sprint.startDate, sprint.endDate);
+  return { ...sprint, id: sprintId(sprint), durationDays: 14, progress, current };
+}
+
+async function authorizedSprint(req, res) {
+  const id = String(req.params.id || '');
+  if (!/^[a-zA-Z0-9_-]{8,}$/.test(id)) {
+    res.status(400).json({ error: 'Invalid sprint id.' });
+    return null;
+  }
+  const sprint = await sprintStore.find(id, userId(req));
+  if (!sprint) {
+    res.status(404).json({ error: 'Sprint not found.' });
+    return null;
+  }
+  return sprint;
+}
 
 function userId(req) { return String(req.user._id); }
 function canAccess(task, req) { return String(task.ownerId) === userId(req) || req.role === 'admin'; }
@@ -124,10 +193,12 @@ function validateTaskInput(body, partial = false) {
   if (body.labels !== undefined && (!Array.isArray(body.labels) || body.labels.length > 10 || body.labels.some((label) => typeof label !== 'string' || !label.trim() || label.length > 40))) throw createAuthError(400, 'Labels must be non-empty text values.');
   if (body.assignee !== undefined && (typeof body.assignee !== 'string' || body.assignee.trim().length > 120)) throw createAuthError(400, 'Assignee must be text up to 120 characters.');
   if (body.dueDate !== undefined && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
+  if (body.sprintId !== undefined && (body.sprintId !== null && (typeof body.sprintId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.sprintId)))) throw createAuthError(400, 'Invalid sprint id.');
+  if (body.storyPoints !== undefined && (!Number.isInteger(body.storyPoints) || body.storyPoints < 0 || body.storyPoints > 100)) throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
 }
 function validTaskKey(key) { return typeof key === 'string' && /^KAN-[A-Z0-9]+$/i.test(key); }
 function taskUpdates(body) {
-  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate', 'sprintId', 'storyPoints'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
 }
 function dependencyGraph(tasks) {
   const graph = new Map(tasks.map((task) => [task.key, (task.dependencies || []).map((dep) => dep.toTask)]));
@@ -209,6 +280,91 @@ app.post('/api/auth/reset-password', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/api/sprints', requireAuth, async (req, res, next) => {
+  try {
+    await ensureDefaultSprint(userId(req));
+    const sprints = await sprintStore.list(userId(req));
+    res.json(await Promise.all(sprints.map(async (sprint) => sprintView(sprint, await store.listBySprint(sprintId(sprint))))));
+  } catch (error) { next(error); }
+});
+app.post('/api/sprints', requireAuth, async (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const goal = String(req.body?.goal || '').trim();
+    const startDate = String(req.body?.startDate || todayIsoDate());
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Sprint name must be between 1 and 120 characters.' });
+    if (goal.length > 1000) return res.status(400).json({ error: 'Sprint goal must be 1000 characters or fewer.' });
+    const endDate = String(req.body?.endDate || endDateForStart(startDate));
+    const dateValidation = validateSprintRange(startDate, endDate);
+    if (!dateValidation.ok) return res.status(400).json({ error: dateValidation.error });
+    res.status(201).json(sprintView(await sprintStore.create({ ownerId: userId(req), name, goal, startDate, endDate }), []));
+  } catch (error) { next(error); }
+});
+app.get('/api/sprints/:id', requireAuth, async (req, res, next) => {
+  try {
+    const sprint = await authorizedSprint(req, res);
+    if (!sprint) return;
+    res.json(sprintView(sprint, await store.listBySprint(sprintId(sprint))));
+  } catch (error) { next(error); }
+});
+app.patch('/api/sprints/:id', requireAuth, async (req, res, next) => {
+  try {
+    const sprint = await authorizedSprint(req, res);
+    if (!sprint) return;
+    const updates = {};
+    if (req.body?.name !== undefined) {
+      updates.name = String(req.body.name).trim();
+      if (!updates.name || updates.name.length > 120) return res.status(400).json({ error: 'Sprint name must be between 1 and 120 characters.' });
+    }
+    if (req.body?.goal !== undefined) {
+      updates.goal = String(req.body.goal).trim();
+      if (updates.goal.length > 1000) return res.status(400).json({ error: 'Sprint goal must be 1000 characters or fewer.' });
+    }
+    const startDate = req.body?.startDate ?? sprint.startDate;
+    const endDate = req.body?.endDate ?? sprint.endDate;
+    const dateValidation = validateSprintRange(startDate, endDate);
+    if (!dateValidation.ok) return res.status(400).json({ error: dateValidation.error });
+    updates.startDate = startDate; updates.endDate = endDate;
+    const updated = await sprintStore.update(sprintId(sprint), userId(req), updates);
+    res.json(sprintView(updated, await store.listBySprint(sprintId(updated))));
+  } catch (error) { next(error); }
+});
+app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
+  try {
+    const sprint = await authorizedSprint(req, res);
+    if (!sprint) return;
+    const tasks = await store.listBySprint(sprintId(sprint));
+    res.json(tasks.filter((task) => canAccess(task, req)));
+  } catch (error) { next(error); }
+});
+app.get('/api/backlog', requireAuth, async (req, res, next) => {
+  try {
+    const tasks = await store.listWithoutSprint();
+    res.json(tasks.filter((task) => canAccess(task, req)));
+  } catch (error) { next(error); }
+});
+app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
+  try {
+    const sprint = await authorizedSprint(req, res);
+    if (!sprint) return;
+    const key = String(req.body?.key || '');
+    const task = await store.find(key);
+    if (!task || !canAccess(task, req)) return res.status(404).json({ error: 'Task not found.' });
+    const updated = await store.update(key, { sprintId: sprintId(sprint) });
+    res.status(201).json(updated);
+  } catch (error) { next(error); }
+});
+app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) => {
+  try {
+    const sprint = await authorizedSprint(req, res);
+    if (!sprint) return;
+    const task = await store.find(req.params.key);
+    if (!task || !canAccess(task, req) || String(task.sprintId) !== sprintId(sprint)) return res.status(404).json({ error: 'Task not found in sprint.' });
+    await store.update(task.key, { sprintId: null });
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     const tasks = await store.list();
@@ -218,13 +374,15 @@ app.get('/api/tasks', requireAuth, async (req, res, next) => {
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
+    if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
     let key;
     do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
     const task = await store.create({
       key, ownerId: userId(req), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
       status: req.body.status || 'backlog', priority: req.body.priority || 'medium',
       labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
-      dueDate: String(req.body.dueDate || '').slice(0, 40), comments: [], attachments: [], dependencies: []
+      dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
+      comments: [], attachments: [], dependencies: []
     });
     res.status(201).json(task);
   } catch (error) { next(error); }
@@ -234,6 +392,7 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     const task = await authorizedTask(req, res);
     if (!task) return;
     validateTaskInput(req.body || {}, true);
+    if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
     const updates = taskUpdates(req.body);
     if (updates.title !== undefined) updates.title = updates.title.trim();
     if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
