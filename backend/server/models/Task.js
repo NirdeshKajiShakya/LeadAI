@@ -10,6 +10,9 @@ const taskSchema = new mongoose.Schema({
   assignee: { type: String, default: 'Unassigned' },
   dueDate: { type: String, default: '' },
   aiSuggested: { type: Boolean, default: false },
+  // Sprint planning: null keeps the task in the product backlog.
+  sprintId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sprint', default: null },
+  storyPoints: { type: Number, default: 0, min: 0 },
   createdAt: { type: Date, default: Date.now }
 });
 

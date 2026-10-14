@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch server/index.js",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js"
   },
   "dependencies": {
     "express": "latest",
