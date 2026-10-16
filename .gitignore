@@ -5,3 +5,4 @@ stitch_ai_kanban_task_manager
 .vscode
 backend/uploads
 backend/.env
+.github

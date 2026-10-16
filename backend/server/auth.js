@@ -61,6 +61,12 @@ export async function findUserByEmail(email) {
   return User.findOne({ email: normalizedEmail }).select('+passwordHash');
 }
 
+export async function findUserById(id) {
+  if (!id) return null;
+  if (!databaseReady) return [...memoryUsers.values()].find((user) => String(user._id) === String(id)) || null;
+  return User.findById(id);
+}
+
 export async function createUser({ email, password, name, role = 'member' }) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {

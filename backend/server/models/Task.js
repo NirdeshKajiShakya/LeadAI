@@ -25,6 +25,7 @@ const dependencySchema = new mongoose.Schema({
 const taskSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true, index: true },
   ownerId: { type: String, default: null, index: true },
+  boardId: { type: String, default: null, index: true },
   title: { type: String, required: true, trim: true, maxlength: 180 },
   description: { type: String, default: '', maxlength: 4000 },
   status: { type: String, enum: ['backlog', 'todo', 'progress', 'review', 'done'], default: 'backlog' },

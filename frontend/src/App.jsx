@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
-  Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Plus, Search, Settings2,
+  Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
   Sparkles, Target, Users, X, Zap
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
@@ -34,6 +34,11 @@ function App() {
   const [authError, setAuthError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [tasks, setTasks] = useState([]);
+  const [boards, setBoards] = useState([]);
+  const [activeBoardId, setActiveBoardId] = useState('');
+  const [boardDialog, setBoardDialog] = useState(null);
+  const [boardName, setBoardName] = useState('');
+  const [boardBusy, setBoardBusy] = useState(false);
   const [query, setQuery] = useState('');
   const [priority, setPriority] = useState('all');
   const [activeLabel, setActiveLabel] = useState('All');
@@ -60,6 +65,13 @@ function App() {
       .then((response) => (response.ok ? response.json() : null))
       .then((profile) => setUser(profile))
       .catch(() => setUser(null));
+    fetch(`${API_BASE_URL}/api/boards`, { headers: authHeaders })
+      .then((response) => response.json())
+      .then((list) => {
+        setBoards(list);
+        setActiveBoardId((current) => current || list[0]?.id || '');
+      })
+      .catch(() => setBoards([]));
     fetch(`${API_BASE_URL}/api/tasks`, { headers: authHeaders }).then(async (response) => {
       if (response.status === 401) {
         sessionStorage.removeItem('leadai-session');
@@ -70,6 +82,58 @@ function App() {
     }).then(setTasks).catch(() => setTasks([])).finally(() => setLoading(false));
     return () => window.removeEventListener('popstate', handlePopState);
   }, [token]);
+
+  useEffect(() => {
+    if (!token || !activeBoardId) return;
+    fetch(`${API_BASE_URL}/api/tasks?boardId=${encodeURIComponent(activeBoardId)}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    }).then((response) => response.json()).then(setTasks).catch(() => setTasks([]));
+  }, [token, activeBoardId]);
+
+  useEffect(() => {
+    if (!boards.length) {
+      setActiveBoardId('');
+    } else if (!boards.some((board) => board.id === activeBoardId)) {
+      setActiveBoardId(boards[0].id);
+    }
+  }, [boards, activeBoardId]);
+
+  function switchBoard(boardId) {
+    setActiveBoardId(boardId);
+    navigate('/board');
+  }
+
+  function openBoardDialog(mode) {
+    const activeBoard = boards.find((board) => board.id === activeBoardId);
+    setBoardName(mode === 'rename' ? activeBoard?.name || '' : '');
+    setBoardDialog(mode);
+  }
+
+  async function saveBoard(event) {
+    event.preventDefault();
+    if (!boardName.trim() || boardBusy) return;
+    setBoardBusy(true);
+    setAuthError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}${boardDialog === 'rename' ? `/api/boards/${activeBoardId}` : '/api/boards'}`, {
+        method: boardDialog === 'rename' ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name: boardName.trim() })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || 'Could not save board.');
+      const listResponse = await fetch(`${API_BASE_URL}/api/boards`, { headers: { Authorization: `Bearer ${token}` } });
+      const list = await listResponse.json();
+      setBoards(list);
+      if (boardDialog === 'create') setActiveBoardId(payload.id);
+      setBoardDialog(null);
+      setBoardName('');
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      setBoardBusy(false);
+    }
+  }
 
   function navigate(path) {
     window.history.pushState({}, '', path);
@@ -97,7 +161,7 @@ function App() {
   async function createTask(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assignee: form.get('assignee') || 'Unassigned', dueDate: form.get('dueDate') || 'Unscheduled' };
+    const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assignee: form.get('assignee') || 'Unassigned', dueDate: form.get('dueDate') || 'Unscheduled', boardId: activeBoardId };
     const response = await fetch(`${API_BASE_URL}/api/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
     const task = await response.json();
     if (!response.ok) return setAuthError(task.error || 'Could not create task.');
@@ -205,7 +269,7 @@ function App() {
   return <div className="app-shell">
     <header className="topbar">
       <button className="brand-lockup" onClick={() => navigate('/')}><div className="logo-mark"><span></span><span></span><span></span></div><strong>LeadAI</strong></button>
-      <div className="workspace-picker"><span className="workspace-dot"></span> {user ? `${user.name}'s workspace` : 'My workspace'} <ChevronDown size={13} /></div>
+      <div className="board-breadcrumb" aria-label="Board location"><span>Workspace</span><b>/</b><span>Projects</span><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{boards.find((board) => board.id === activeBoardId)?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></div>
       <div className="topbar-actions">
         <label className="global-search"><Search size={15} /><input placeholder="Search tasks, comments, agents..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
         <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" onClick={() => navigate('/profile')}>{initialsOf(user?.name)}<span></span></button>
@@ -220,7 +284,7 @@ function App() {
       </aside>
       <main className="main-content">
         {authError && <div className="form-error" role="alert">{authError}<button type="button" onClick={() => setAuthError('')} aria-label="Dismiss error"><X size={13} /></button></div>}
-        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : <>
+        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
         <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{user?.name ? `${user.name}'s board` : 'My board'}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(true)}><Bolt size={15} /> AI Auto-Triage</button><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>
@@ -228,6 +292,7 @@ function App() {
         <section className="velocity-panel"><div><div className="eyebrow">Your progress</div><h2>Here is how your board is tracking right now</h2></div><div className="velocity-stats"><div><strong>{tasks.length}</strong><span>Total tasks</span></div><div><strong>{inFlight}</strong><span>In progress</span></div><div><strong>{completed}</strong><span>Completed</span></div></div></section>
         {showModal && <TaskModal status={modalStatus} task={editingTask} onClose={() => { setShowModal(false); setEditingTask(null); }} onSubmit={editingTask ? saveTask : createTask} assignees={user?.name ? [user.name] : []} />}
         </>}
+        {boardDialog && <BoardDialog mode={boardDialog} name={boardName} setName={setBoardName} busy={boardBusy} onClose={() => setBoardDialog(null)} onSubmit={saveBoard} />}
       </main>
     </div>
   </div>;
@@ -242,7 +307,57 @@ function Metric({ label, value, dot, icon }) { return <div className="metric"><s
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove, onEdit, onDelete }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
 function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><span className="assignee"><i>{initialsOf(task.assignee)}</i>{task.assignee}</span><span className="task-meta"><CalendarDays size={13} />{task.dueDate}</span><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></article>; }
 function TaskList({ tasks, onMove, onEdit, onDelete }) { return <div className="task-table"><div className="task-table-head"><span>Task</span><span>Status</span><span>Priority</span><span>Assignee</span><span>Due</span><span>Actions</span></div>{tasks.length ? tasks.map((task) => <div className="task-table-row" key={task.key}><div><strong>#{task.key}</strong><span>{task.title}</span></div><select aria-label={`Status for ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span><span>{task.assignee}</span><span>{task.dueDate}</span><span className="row-actions"><button type="button" onClick={() => onEdit(task)}>Edit</button><button type="button" onClick={() => onDelete(task)}>Delete</button></span></div>) : <div className="empty-column">No tasks match the current filters.</div>}</div>; }
+function BoardEmptyState({ onCreate, onManage }) {
+  return <section className="board-empty-state"><div className="board-empty-icon"><LayoutGrid size={25} /></div><div className="eyebrow">Your workspace is ready</div><h1>Create your first kanban board</h1><p>Boards keep projects, tasks, and collaborators organized. Create one now to start planning your work.</p><div className="board-empty-actions"><button className="primary-button" onClick={onCreate}><Plus size={16} /> Create a board</button><button className="secondary-button" onClick={onManage}>Open board management</button></div></section>;
+}
+function BoardDialog({ mode, name, setName, busy, onClose, onSubmit }) {
+  const isRename = mode === 'rename';
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="task-modal board-dialog" onSubmit={onSubmit}><div className="modal-heading"><div><div className="eyebrow">{isRename ? 'Board settings' : 'New board'}</div><h2>{isRename ? 'Rename board' : 'Create a board'}</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={17} /></button></div><p className="board-dialog-copy">{isRename ? 'Choose a name that helps your team recognize this workspace.' : 'Give your new workspace a clear name. You can invite collaborators after it is created.'}</p><label>Board name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} placeholder="e.g. Website launch" autoFocus required /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Saving...' : isRename ? 'Save name' : 'Create board'}</button></div></form></div>;
+}
 function Copilot({ messages, input, setInput, onSubmit, onClose }) { return <aside className="copilot"><div className="copilot-header"><div className="copilot-title"><span className="copilot-icon"><Bot size={17} /><i></i></span><div><strong>LeadAI Copilot <b>LIVE</b></strong><small>Your workspace</small></div></div><div className="copilot-actions"><IconButton label="Close Copilot" onClick={onClose}><X size={16} /></IconButton></div></div><div className="copilot-context"><span><Activity size={13} /> {messages.length} messages</span><button><Activity size={12} /> Re-analyze</button></div><div className="chat-stream">{messages.map((message, index) => <div key={`${message.text}-${index}`} className={`chat-message ${message.role}`}><span className="message-icon">{message.role === 'assistant' ? <Sparkles size={13} /> : 'You'}</span><div><p>{message.text}</p><small>{message.role === 'assistant' ? 'LeadAI Copilot' : 'Just now'}</small></div></div>)}<div className="suggestion"><Check size={14} /><span>Board context is current</span></div></div><form className="copilot-input" onSubmit={onSubmit}><input placeholder="Ask LeadAI to create tasks, triage..." value={input} onChange={(event) => setInput(event.target.value)} /><button aria-label="Send Copilot message"><ArrowRight size={17} /></button><small>Press Enter to execute</small></form></aside>; }
+function BoardManager({ token, boards, setBoards, activeBoardId }) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [error, setError] = useState('');
+  const active = boards.find((board) => board.id === activeBoardId) || boards[0];
+  async function request(path, options = {}) {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(options.headers || {}) }
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || 'Board request failed.');
+    return body;
+  }
+  async function refresh() { setBoards(await request('/api/boards')); }
+  async function create(event) {
+    event.preventDefault();
+    try { await request('/api/boards', { method: 'POST', body: JSON.stringify({ name }) }); setName(''); setError(''); await refresh(); }
+    catch (requestError) { setError(requestError.message); }
+  }
+  async function rename() {
+    const nextName = window.prompt('New board name', active?.name);
+    if (!active || nextName === null) return;
+    try { await request(`/api/boards/${active.id}`, { method: 'PATCH', body: JSON.stringify({ name: nextName }) }); setError(''); await refresh(); }
+    catch (requestError) { setError(requestError.message); }
+  }
+  async function remove() {
+    if (!active || !window.confirm(`Delete "${active.name}" and its tasks? This cannot be undone.`)) return;
+    try { await request(`/api/boards/${active.id}`, { method: 'DELETE' }); setError(''); await refresh(); }
+    catch (requestError) { setError(requestError.message); }
+  }
+  async function invite(event) {
+    event.preventDefault();
+    try { await request(`/api/boards/${active.id}/members`, { method: 'POST', body: JSON.stringify({ email }) }); setEmail(''); setError(''); await refresh(); }
+    catch (requestError) { setError(requestError.message); }
+  }
+  return <section className="route-page"><div className="route-hero"><div className="eyebrow">Team & Workspace</div><h1>Kanban boards</h1><p>Create focused boards, name them, and invite teammates to collaborate.</p></div><div className="board-manager">
+    <form className="board-create-form" onSubmit={create}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="New board name" maxLength={120} required /><button className="primary-button"><Plus size={15} /> Create board</button></form>
+    {error && <div className="form-error" role="alert">{error}</div>}
+    {boards.map((board) => <article className={`board-manager-card ${board.id === active?.id ? 'is-active' : ''}`} key={board.id}><div><strong>{board.name}</strong><small>{board.isOwner ? 'Owner' : 'Member'} · {board.memberIds.length} member{board.memberIds.length === 1 ? '' : 's'}</small></div>{board.id === active?.id && board.isOwner && <div className="board-manager-actions"><button className="secondary-button" onClick={rename}>Rename</button><button className="secondary-button danger-button" onClick={remove}>Delete</button></div>}</article>)}
+    {active?.isOwner && <form className="board-invite-form" onSubmit={invite}><h2>Invite to {active.name}</h2><p>Enter the email address of an existing LeadAI account.</p><div><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@example.com" required /><button className="secondary-button"><Users size={15} /> Add member</button></div></form>}
+  </div></section>;
+}
 function RoutePage({ pathname, navigate, user, onSignIn }) {
   const displayName = user?.name || 'your account';
   const pages = {
