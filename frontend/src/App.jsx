@@ -32,6 +32,7 @@ function App() {
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState('signin');
   const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const [tasks, setTasks] = useState([]);
   const [query, setQuery] = useState('');
   const [priority, setPriority] = useState('all');
@@ -155,25 +156,37 @@ function App() {
 
   async function authenticate(event) {
     event.preventDefault();
+    if (authBusy) return;
     setAuthError('');
+    setAuthBusy(true);
     const form = new FormData(event.currentTarget);
     const endpoint = authMode === 'signup' ? '/api/auth/signup' : '/api/auth/signin';
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: form.get('email'), password: form.get('password'), name: form.get('name') })
-    });
-    const payload = await response.json();
-    if (!response.ok) return setAuthError(payload.error || 'Authentication failed.');
-    if (authMode === 'signup') {
-      setAuthMode('signin');
-      return setAuthError('Account created. Sign in to continue.');
+    try {
+      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: form.get('email'), password: form.get('password'), name: form.get('name') })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setAuthError(payload.error || 'Authentication failed.');
+        return;
+      }
+      if (authMode === 'signup') {
+        setAuthMode('signin');
+        setAuthError('Account created. Sign in to continue.');
+        return;
+      }
+      sessionStorage.setItem('leadai-session', payload.token);
+      setToken(payload.token);
+    } catch {
+      setAuthError('Could not reach the server. Make sure the LeadAI API is running and try again.');
+    } finally {
+      setAuthBusy(false);
     }
-    sessionStorage.setItem('leadai-session', payload.token);
-    setToken(payload.token);
   }
 
-  if (!token) return <AuthScreen mode={authMode} setMode={setAuthMode} error={authError} onSubmit={authenticate} />;
+  if (!token) return <AuthScreen mode={authMode} setMode={setAuthMode} error={authError} busy={authBusy} onSubmit={authenticate} />;
 
   function sendCopilot(event) {
     event.preventDefault();
@@ -207,7 +220,7 @@ function App() {
       </aside>
       <main className="main-content">
         {authError && <div className="form-error" role="alert">{authError}<button type="button" onClick={() => setAuthError('')} aria-label="Dismiss error"><X size={13} /></button></div>}
-        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} /> : <>
+        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : <>
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
         <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{user?.name ? `${user.name}'s board` : 'My board'}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(true)}><Bolt size={15} /> AI Auto-Triage</button><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>
@@ -221,16 +234,16 @@ function App() {
 }
 
 function NavItem({ icon, label, active, badge, onClick }) { return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{badge && <em>{badge}</em>}</button>; }
-function AuthScreen({ mode, setMode, error, onSubmit }) {
+function AuthScreen({ mode, setMode, error, busy, onSubmit }) {
   const signup = mode === 'signup';
-  return <main className="auth-screen"><div className="auth-panel"><div className="logo-mark"><span></span><span></span><span></span></div><div className="eyebrow">LeadAI workspace</div><h1>{signup ? 'Create your account' : 'Welcome back'}</h1><p>{signup ? 'Start shaping clearer work for your team.' : 'Sign in to continue to your sprint board.'}</p><form onSubmit={onSubmit}>{signup && <label>Name<input name="name" autoComplete="name" maxLength="80" /></label>}<label>Email<input name="email" type="email" autoComplete="email" required /></label><label>Password<input name="password" type="password" minLength="8" maxLength="128" autoComplete={signup ? 'new-password' : 'current-password'} required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button" type="submit">{signup ? 'Create account' : 'Sign in'} <ArrowRight size={15} /></button></form><button className="auth-switch" onClick={() => setMode(signup ? 'signin' : 'signup')}>{signup ? 'Already have an account? Sign in' : 'Need an account? Sign up'}</button></div></main>;
+  return <main className="auth-screen"><div className="auth-panel"><div className="logo-mark"><span></span><span></span><span></span></div><div className="eyebrow">LeadAI workspace</div><h1>{signup ? 'Create your account' : 'Welcome back'}</h1><p>{signup ? 'Start shaping clearer work for your team.' : 'Sign in to continue to your sprint board.'}</p><form onSubmit={onSubmit}>{signup && <label>Name<input name="name" autoComplete="name" maxLength="80" /></label>}<label>Email<input name="email" type="email" autoComplete="email" required /></label><label>Password<input name="password" type="password" minLength="8" maxLength="128" autoComplete={signup ? 'new-password' : 'current-password'} required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button" type="submit" disabled={busy}>{busy ? 'Working...' : signup ? 'Create account' : 'Sign in'} {!busy && <ArrowRight size={15} />}</button></form><button className="auth-switch" onClick={() => setMode(signup ? 'signin' : 'signup')} disabled={busy}>{signup ? 'Already have an account? Sign in' : 'Need an account? Sign up'}</button></div></main>;
 }
 function Metric({ label, value, dot, icon }) { return <div className="metric"><span>{dot && <i className={`metric-dot ${dot}`}></i>}{icon}{label}</span><strong>{value}</strong></div>; }
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove, onEdit, onDelete }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
 function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><span className="assignee"><i>{initialsOf(task.assignee)}</i>{task.assignee}</span><span className="task-meta"><CalendarDays size={13} />{task.dueDate}</span><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></article>; }
 function TaskList({ tasks, onMove, onEdit, onDelete }) { return <div className="task-table"><div className="task-table-head"><span>Task</span><span>Status</span><span>Priority</span><span>Assignee</span><span>Due</span><span>Actions</span></div>{tasks.length ? tasks.map((task) => <div className="task-table-row" key={task.key}><div><strong>#{task.key}</strong><span>{task.title}</span></div><select aria-label={`Status for ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span><span>{task.assignee}</span><span>{task.dueDate}</span><span className="row-actions"><button type="button" onClick={() => onEdit(task)}>Edit</button><button type="button" onClick={() => onDelete(task)}>Delete</button></span></div>) : <div className="empty-column">No tasks match the current filters.</div>}</div>; }
 function Copilot({ messages, input, setInput, onSubmit, onClose }) { return <aside className="copilot"><div className="copilot-header"><div className="copilot-title"><span className="copilot-icon"><Bot size={17} /><i></i></span><div><strong>LeadAI Copilot <b>LIVE</b></strong><small>Your workspace</small></div></div><div className="copilot-actions"><IconButton label="Close Copilot" onClick={onClose}><X size={16} /></IconButton></div></div><div className="copilot-context"><span><Activity size={13} /> {messages.length} messages</span><button><Activity size={12} /> Re-analyze</button></div><div className="chat-stream">{messages.map((message, index) => <div key={`${message.text}-${index}`} className={`chat-message ${message.role}`}><span className="message-icon">{message.role === 'assistant' ? <Sparkles size={13} /> : 'You'}</span><div><p>{message.text}</p><small>{message.role === 'assistant' ? 'LeadAI Copilot' : 'Just now'}</small></div></div>)}<div className="suggestion"><Check size={14} /><span>Board context is current</span></div></div><form className="copilot-input" onSubmit={onSubmit}><input placeholder="Ask LeadAI to create tasks, triage..." value={input} onChange={(event) => setInput(event.target.value)} /><button aria-label="Send Copilot message"><ArrowRight size={17} /></button><small>Press Enter to execute</small></form></aside>; }
-function RoutePage({ pathname, navigate, user }) {
+function RoutePage({ pathname, navigate, user, onSignIn }) {
   const displayName = user?.name || 'your account';
   const pages = {
     '/backlog': ['Backlog', 'Work that has not been started yet lives here.', 'Move items to To Do when you are ready'],
@@ -242,7 +255,7 @@ function RoutePage({ pathname, navigate, user }) {
   };
   const page = pages[pathname] || ['Page not found', 'This route is not configured yet.', 'Return to the active board'];
   const isSignIn = pathname === '/signin';
-  return <section className={`route-page ${isSignIn ? 'auth-page' : ''}`}><div className="route-hero"><div className="eyebrow">LeadAI workspace</div><h1>{page[0]}</h1><p>{page[1]}</p><span className="route-status"><Activity size={13} /> {page[2]}</span></div>{isSignIn ? <form className="auth-card" onSubmit={(event) => { event.preventDefault(); navigate('/'); }}><label>Work email<input type="email" required placeholder="you@example.com" /></label><label>Password<input type="password" required placeholder="Your password" /></label><button className="primary-button" type="submit">Sign in to workspace <ArrowRight size={15} /></button></form> : <div className="route-grid"><div className="route-card"><Sparkles size={18} /><h2>Your board is ready</h2><p>Everything you create here belongs to {displayName}. Open the board to start capturing work.</p><button className="secondary-button" onClick={() => navigate('/')}>Open Kanban Board <ArrowRight size={14} /></button></div><div className="route-card"><Target size={18} /><h2>Keep work moving</h2><p>Use the board to organize tasks by status and track them from backlog to done.</p><button className="secondary-button" onClick={() => navigate('/board')}>Review active work <ArrowRight size={14} /></button></div></div>}</section>;
+  return <section className={`route-page ${isSignIn ? 'auth-page' : ''}`}><div className="route-hero"><div className="eyebrow">LeadAI workspace</div><h1>{page[0]}</h1><p>{page[1]}</p><span className="route-status"><Activity size={13} /> {page[2]}</span></div>{isSignIn ? <form className="auth-card" onSubmit={onSignIn}><label>Work email<input name="email" type="email" autoComplete="email" required placeholder="you@example.com" /></label><label>Password<input name="password" type="password" autoComplete="current-password" required placeholder="Your password" /></label><button className="primary-button" type="submit">Sign in to workspace <ArrowRight size={15} /></button></form> : <div className="route-grid"><div className="route-card"><Sparkles size={18} /><h2>Your board is ready</h2><p>Everything you create here belongs to {displayName}. Open the board to start capturing work.</p><button className="secondary-button" onClick={() => navigate('/')}>Open Kanban Board <ArrowRight size={14} /></button></div><div className="route-card"><Target size={18} /><h2>Keep work moving</h2><p>Use the board to organize tasks by status and track them from backlog to done.</p><button className="secondary-button" onClick={() => navigate('/board')}>Review active work <ArrowRight size={14} /></button></div></div>}</section>;
 }
 function TaskModal({ status, task, onClose, onSubmit, assignees }) { const options = assignees && assignees.length ? assignees : ['Unassigned']; return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="task-modal" onSubmit={onSubmit}><div className="modal-heading"><div><div className="eyebrow">{task ? 'Edit work' : 'New work'}</div><h2>{task ? 'Edit task' : 'Create task'}</h2></div><IconButton label="Close dialog" onClick={onClose}><X size={17} /></IconButton></div><label>Task title<input name="title" autoFocus required defaultValue={task?.title || ''} placeholder="e.g. Add rate limiting to API gateway" /></label><label>Description<textarea name="description" rows="3" defaultValue={task?.description || ''} placeholder="What does done look like?" /></label><div className="form-grid"><label>Priority<select name="priority" defaultValue={task?.priority || 'medium'}><option value="urgent">P0 Urgent</option><option value="high">P1 High</option><option value="medium">P2 Medium</option><option value="low">P3 Low</option></select></label><label>Assignee<select name="assignee" defaultValue={task?.assignee || 'Unassigned'}><option>Unassigned</option>{options.filter((name) => name !== 'Unassigned').map((name) => <option key={name}>{name}</option>)}</select></label></div><div className="form-grid"><label>Label<input name="label" defaultValue={task?.labels?.[0] || ''} placeholder="Frontend" /></label><label>Due date<input name="dueDate" defaultValue={task?.dueDate || ''} placeholder="Oct 18" /></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">{task ? 'Save changes' : <><Plus size={15} /> Add to {columns.find((column) => column.id === status)?.label}</>}</button></div></form></div>; }
 

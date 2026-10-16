@@ -91,16 +91,16 @@ async function seedStarterTasks(user) {
 }
 
 async function connectMongo() {
-  if (!process.env.MONGODB_URI) {
-    return;
-  }
+  const mongoUri = process.env.MONGODB_URI?.trim();
+  if (!mongoUri) return;
+
   try {
-    await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 1500 });
+    await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 10_000 });
     mongoReady = true;
     setDatabaseReady(true);
     console.log('MongoDB connected');
   } catch (error) {
-    console.warn(`MongoDB unavailable, using in-memory storage: ${error.message}`);
+    throw new Error(`MongoDB connection failed. Check MONGODB_URI and network access: ${error.message}`, { cause: error });
   }
 }
 
@@ -551,4 +551,9 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 export { app, connectMongo, memoryTasks, sessions };
-connectMongo().then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)));
+connectMongo()
+  .then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)))
+  .catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
