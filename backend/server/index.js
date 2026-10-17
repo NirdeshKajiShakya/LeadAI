@@ -9,12 +9,13 @@ import fs from 'node:fs';
 import { Task } from './models/Task.js';
 import { Sprint } from './models/Sprint.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
-import { User } from './models/User.js';
+import { User, USERNAME_PATTERN } from './models/User.js';
+import { connectDatabase, databaseStatus } from './db.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
   createResetToken, consumeResetToken, memoryUsers, hashPassword, setDatabaseReady,
-  sessions
+  refreshSessionUser, serializeUser, sessions
 } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -82,26 +83,35 @@ let memorySprintCounter = 0;
 function withSprintId(sprint) {
   return sprint._id ? sprint : { ...sprint, _id: `mem-sprint-${Date.now()}-${++memorySprintCounter}` };
 }
+// Task keys are globally unique. With five developers on one database a random key can
+// collide, so retry the insert instead of returning a 500 to the person creating work.
+async function createTaskWithFreshKey(data) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const key = `KAN-${crypto.randomInt(1000, 10000)}`;
+    try {
+      return await store.create({ ...data, key });
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+    }
+  }
+  throw createAuthError(503, 'Could not allocate a task key. Please try again.');
+}
+
 async function seedStarterTasks(user) {
   for (const template of starterTasksFor(user)) {
-    let key;
-    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
-    await store.create({ key, ownerId: String(user._id), ...template, comments: [], attachments: [], dependencies: [] });
+    await createTaskWithFreshKey({ ownerId: String(user._id), ...template, comments: [], attachments: [], dependencies: [] });
   }
 }
 
 async function connectMongo() {
-  if (!process.env.MONGODB_URI) {
-    return;
-  }
-  try {
-    await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 1500 });
+  const status = await connectDatabase();
+  if (status.mode === 'mongodb') {
     mongoReady = true;
     setDatabaseReady(true);
-    console.log('MongoDB connected');
-  } catch (error) {
-    console.warn(`MongoDB unavailable, using in-memory storage: ${error.message}`);
+  } else {
+    console.warn('[db] ALLOW_MEMORY_DB is enabled: data lives in RAM only and is neither shared nor persisted.');
   }
+  return status;
 }
 
 const store = {
@@ -127,12 +137,22 @@ const store = {
     return { deletedCount: before - memoryTasks.length };
   },
   listBySprint: (id) => mongoReady ? Task.find({ sprintId: id }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.sprintId) === String(id))),
-  listWithoutSprint: () => mongoReady ? Task.find({ sprintId: null }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => !task.sprintId))
+  // Board and profile queries are owner-scoped in the database; a shared database must
+  // never require loading every developer's tasks to show one person's board.
+  listByOwner: (ownerId) => mongoReady ? Task.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.ownerId) === String(ownerId))),
+  listWithoutSprint: (ownerId) => {
+    if (!mongoReady) return Promise.resolve(memoryTasks.filter((task) => !task.sprintId && (!ownerId || String(task.ownerId) === String(ownerId))));
+    return Task.find(ownerId ? { sprintId: null, ownerId } : { sprintId: null }).sort({ createdAt: 1 }).lean();
+  }
 };
 
 const sprintStore = {
   list: (ownerId) => mongoReady ? Sprint.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memorySprints.filter((sprint) => String(sprint.ownerId) === String(ownerId))),
-  find: (id, ownerId) => mongoReady ? Sprint.findOne({ _id: id, ownerId }).lean() : Promise.resolve(memorySprints.find((sprint) => sprintId(sprint) === String(id) && String(sprint.ownerId) === String(ownerId))),
+  find: (id, ownerId) => {
+    if (!mongoReady) return Promise.resolve(memorySprints.find((sprint) => sprintId(sprint) === String(id) && String(sprint.ownerId) === String(ownerId)));
+    // A malformed id would otherwise throw a CastError and surface as a 500.
+    return mongoose.isValidObjectId(id) ? Sprint.findOne({ _id: id, ownerId }).lean() : Promise.resolve(null);
+  },
   create: async (data) => {
     if (mongoReady) return new Sprint(data).save();
     const sprint = withSprintId({ ...data, createdAt: new Date() });
@@ -230,7 +250,174 @@ function blockedTask(task, tasks, seen = new Set()) {
   });
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, database: mongoReady ? 'mongodb' : 'memory' }));
+const BIO_MAX = 300;
+const AVATAR_MAX_BYTES = 80 * 1024;
+const AVATAR_MAX_LENGTH = 110_000;
+
+function profileView(user) {
+  const value = serializeUser(user);
+  return {
+    _id: String(value._id),
+    email: value.email,
+    name: value.name || '',
+    username: value.username || '',
+    bio: value.bio || '',
+    location: value.location || '',
+    website: value.website || '',
+    avatar: value.avatar || '',
+    role: value.role || 'member',
+    createdAt: value.createdAt || null,
+    updatedAt: value.updatedAt || null
+  };
+}
+
+function avatarIsValid(value) {
+  const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match) return false;
+  const bytes = Buffer.from(match[2], 'base64');
+  if (!bytes.length || bytes.length > AVATAR_MAX_BYTES) return false;
+  const signature = bytes.subarray(0, 12).toString('hex');
+  if (match[1] === 'png') return signature.startsWith('89504e47');
+  if (match[1] === 'jpeg') return signature.startsWith('ffd8ff');
+  return bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+}
+
+// Whitelist only. Email, role, sessions and password hashes are never read from the body,
+// so a manipulated profile request cannot change them.
+function profileUpdates(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw createAuthError(400, 'Profile data must be an object.');
+  const updates = {};
+  if (body.name !== undefined) {
+    if (typeof body.name !== 'string') throw createAuthError(400, 'Name must be text.');
+    updates.name = body.name.trim();
+    if (updates.name.length > 80) throw createAuthError(400, 'Name must be 80 characters or fewer.');
+  }
+  if (body.username !== undefined) {
+    if (typeof body.username !== 'string') throw createAuthError(400, 'Username must be text.');
+    updates.username = body.username.trim().toLowerCase();
+    if (updates.username && !USERNAME_PATTERN.test(updates.username)) {
+      throw createAuthError(400, 'Username must be 3-30 characters: lowercase letters, numbers, or hyphens, and cannot start or end with a hyphen.');
+    }
+  }
+  if (body.bio !== undefined) {
+    if (typeof body.bio !== 'string') throw createAuthError(400, 'Bio must be text.');
+    updates.bio = body.bio.trim();
+    if (updates.bio.length > BIO_MAX) throw createAuthError(400, `Bio must be ${BIO_MAX} characters or fewer.`);
+  }
+  if (body.location !== undefined) {
+    if (typeof body.location !== 'string') throw createAuthError(400, 'Location must be text.');
+    updates.location = body.location.trim();
+    if (updates.location.length > 80) throw createAuthError(400, 'Location must be 80 characters or fewer.');
+  }
+  if (body.website !== undefined) {
+    if (typeof body.website !== 'string') throw createAuthError(400, 'Website must be text.');
+    updates.website = body.website.trim();
+    if (updates.website.length > 200) throw createAuthError(400, 'Website must be 200 characters or fewer.');
+    if (updates.website) {
+      let parsed;
+      try { parsed = new URL(updates.website); } catch { throw createAuthError(400, 'Website must be a full URL starting with http:// or https://.'); }
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw createAuthError(400, 'Website must start with http:// or https://.');
+    }
+  }
+  if (body.avatar !== undefined) {
+    if (typeof body.avatar !== 'string') throw createAuthError(400, 'Avatar must be an image.');
+    updates.avatar = body.avatar;
+    if (updates.avatar && (updates.avatar.length > AVATAR_MAX_LENGTH || !avatarIsValid(updates.avatar))) {
+      throw createAuthError(400, 'Avatar must be a PNG, JPEG, or WebP image of 80 KB or less.');
+    }
+  }
+  return updates;
+}
+
+async function profilePayload(user) {
+  const ownerId = String(user._id);
+  const [tasks, sprints] = await Promise.all([store.listByOwner(ownerId), sprintStore.list(ownerId)]);
+  const currentSprint = sprints[0] || null;
+  const sprintTasks = currentSprint ? tasks.filter((task) => String(task.sprintId) === sprintId(currentSprint)) : [];
+  return {
+    profile: profileView(user),
+    stats: {
+      totalTasks: tasks.length,
+      openTasks: tasks.filter((task) => task.status !== 'done').length,
+      completedTasks: tasks.filter((task) => task.status === 'done').length,
+      inProgressTasks: tasks.filter((task) => task.status === 'progress').length,
+      sprints: sprints.length
+    },
+    recentTasks: [...tasks]
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+      .slice(0, 5)
+      .map((task) => ({ key: task.key, title: task.title, status: task.status, priority: task.priority, updatedAt: task.updatedAt || task.createdAt || null })),
+    sprint: currentSprint ? {
+      id: sprintId(currentSprint),
+      name: currentSprint.name,
+      startDate: currentSprint.startDate,
+      endDate: currentSprint.endDate,
+      progress: summarizeTasks(sprintTasks),
+      current: computeSprintDay(currentSprint.startDate, currentSprint.endDate)
+    } : null
+  };
+}
+
+async function currentProfileUser(req) {
+  if (!mongoReady) return memoryUsers.get(req.user.email) || req.user;
+  return await User.findById(req.user._id);
+}
+
+app.get('/api/profile', requireAuth, async (req, res, next) => {
+  try {
+    const user = await currentProfileUser(req);
+    if (!user) return res.status(401).json({ error: 'Session expired or invalid.' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(await profilePayload(user));
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/profile', requireAuth, async (req, res, next) => {
+  try {
+    const updates = profileUpdates(req.body || {});
+    let user;
+    if (mongoReady) {
+      if (updates.username) {
+        const taken = await User.findOne({ username: updates.username, _id: { $ne: req.user._id } }).select('_id');
+        if (taken) throw createAuthError(409, 'That username is already taken.');
+      }
+      const set = {};
+      const unset = {};
+      for (const [field, value] of Object.entries(updates)) {
+        if (field === 'username' && !value) unset.username = '';
+        else set[field] = value;
+      }
+      try {
+        user = await User.findByIdAndUpdate(req.user._id, {
+          ...(Object.keys(set).length ? { $set: set } : {}),
+          ...(Object.keys(unset).length ? { $unset: unset } : {})
+        }, { returnDocument: 'after', runValidators: true });
+      } catch (error) {
+        if (error?.code === 11000) throw createAuthError(409, 'That username is already taken.');
+        throw error;
+      }
+      if (!user) return res.status(401).json({ error: 'Session expired or invalid.' });
+    } else {
+      user = memoryUsers.get(req.user.email);
+      if (!user) return res.status(401).json({ error: 'Session expired or invalid.' });
+      if (updates.username) {
+        const taken = [...memoryUsers.values()].some((other) => String(other._id) !== String(user._id) && other.username === updates.username);
+        if (taken) throw createAuthError(409, 'That username is already taken.');
+      }
+      Object.assign(user, updates);
+      if ('username' in updates && !updates.username) delete user.username;
+    }
+    refreshSessionUser(user);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(await profilePayload(user));
+  } catch (error) { next(error); }
+});
+
+app.get('/api/health', (_req, res) => {
+  const status = databaseStatus();
+  const ok = status.mode === 'memory' ? true : status.ready;
+  res.status(ok ? 200 : 503).json({ ok, database: status.mode, db: status.name });
+});
 
 app.post('/api/auth/signup', async (req, res, next) => {
   try {
@@ -339,8 +526,8 @@ app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
 });
 app.get('/api/backlog', requireAuth, async (req, res, next) => {
   try {
-    const tasks = await store.listWithoutSprint();
-    res.json(tasks.filter((task) => canAccess(task, req)));
+    const tasks = await store.listWithoutSprint(req.role === 'admin' ? null : userId(req));
+    res.json(tasks);
   } catch (error) { next(error); }
 });
 app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
@@ -367,18 +554,16 @@ app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) =>
 
 app.get('/api/tasks', requireAuth, async (req, res, next) => {
   try {
-    const tasks = await store.list();
-    res.json(tasks.filter((task) => canAccess(task, req)));
+    const tasks = req.role === 'admin' ? await store.list() : await store.listByOwner(userId(req));
+    res.json(tasks);
   } catch (error) { next(error); }
 });
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
     if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
-    let key;
-    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
-    const task = await store.create({
-      key, ownerId: userId(req), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
+    const task = await createTaskWithFreshKey({
+      ownerId: userId(req), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
       status: req.body.status || 'backlog', priority: req.body.priority || 'medium',
       labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
       dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
@@ -540,6 +725,7 @@ app.get('/api/tasks/:key/blocked', requireAuth, async (req, res, next) => {
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Attachment is invalid or too large.' });
+  if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
   if (isAuthError(error)) return res.status(error.status).json({ error: error.message });
   console.error('Request error:', error.message);
   res.status(500).json({ error: 'An unexpected server error occurred.' });
@@ -551,4 +737,9 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 export { app, connectMongo, memoryTasks, sessions };
-connectMongo().then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)));
+connectMongo()
+  .then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)))
+  .catch((error) => {
+    console.error(`[db] ${error.message}`);
+    process.exit(1);
+  });

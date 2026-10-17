@@ -8,7 +8,7 @@ const PORT = process.env.TEST_PORT || 4100;
 const BASE = `http://127.0.0.1:${PORT}/api`;
 
 const server = spawn(process.execPath, ['server/index.js'], {
-  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '' },
+  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1' },
   stdio: 'ignore'
 });
 

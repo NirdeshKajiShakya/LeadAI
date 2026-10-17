@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
-    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js"
+    "db:setup": "node scripts/db.js setup",
+    "db:check": "node scripts/db.js check",
+    "db:seed": "node scripts/db.js seed",
+    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/lib/dbConfig.test.js && node server/lib/profileApi.test.js",
+    "test:db": "node server/lib/profileDb.test.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
