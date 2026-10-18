@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
-    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js"
+    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/ai.test.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -14,6 +14,7 @@
     "dotenv": "^16.6.1",
     "express": "latest",
     "mongoose": "latest",
-    "multer": "^2.4.0"
+    "multer": "^2.4.0",
+    "openai": "^7.34.0"
   }
 }

@@ -15,8 +15,9 @@ import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
   createResetToken, consumeResetToken, memoryUsers, hashPassword, setDatabaseReady,
-  sessions, findUserByEmail
+  sessions, findUserByEmail, findUserById
 } from './auth.js';
+import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -231,6 +232,22 @@ async function authorizedSprint(req, res) {
 }
 
 function userId(req) { return String(req.user._id); }
+async function boardMembers(board) {
+  const members = await Promise.all((board.memberIds || []).map((id) => findUserById(id)));
+  return members.filter(Boolean).map((member) => ({
+    id: String(member._id),
+    name: String(member.name || member.email),
+    email: String(member.email)
+  }));
+}
+function resolveBoardAssignee(value, members) {
+  const requested = String(value || 'Unassigned').trim();
+  if (!requested || requested.toLowerCase() === 'unassigned') return 'Unassigned';
+  const match = members.find((member) => member.email.toLowerCase() === requested.toLowerCase()
+    || member.name.toLowerCase() === requested.toLowerCase());
+  if (!match) throw createAuthError(400, `Assignee "${requested}" is not a member of this board.`);
+  return match.name;
+}
 async function canAccess(task, req) {
   if (req.role === 'admin' || String(task.ownerId) === userId(req)) return true;
   if (!task.boardId) return false;
@@ -317,7 +334,13 @@ app.get('/api/auth/current', requireAuth, (req, res) => res.json(req.user));
 app.get('/api/boards', requireAuth, async (req, res, next) => {
   try {
     const boards = await boardStore.list(userId(req));
-    res.json(boards.map((board) => ({ ...board, id: boardId(board), isOwner: String(board.ownerId) === userId(req), memberIds: (board.memberIds || []).map(String) })));
+    res.json(await Promise.all(boards.map(async (board) => ({
+      ...board,
+      id: boardId(board),
+      isOwner: String(board.ownerId) === userId(req),
+      memberIds: (board.memberIds || []).map(String),
+      members: await boardMembers(board)
+    }))));
   } catch (error) { next(error); }
 });
 app.post('/api/boards', requireAuth, async (req, res, next) => {
@@ -659,6 +682,82 @@ app.delete('/api/tasks/:key/dependencies/:dependencyId', requireAuth, async (req
 });
 app.get('/api/tasks/:key/blocked', requireAuth, async (req, res, next) => {
   try { const task = await authorizedTask(req, res); if (task) { const tasks = await store.list(); res.json({ blocked: blockedTask(task, tasks), blockers: (task.dependencies || []).filter((dep) => tasks.find((item) => item.key === dep.toTask)?.status !== 'done').map((dep) => dep.toTask) }); } } catch (error) { next(error); }
+});
+
+app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
+  try {
+    const boardId = String(req.body?.boardId || '').trim();
+    const message = String(req.body?.message || '').trim();
+    if (!boardId || !message) return res.status(400).json({ error: 'boardId and message are required.' });
+    if (message.length > MAX_MESSAGE_LENGTH) return res.status(400).json({ error: `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer.` });
+
+    const board = await authorizedBoard({ ...req, params: { id: boardId } }, res);
+    if (!board) return;
+
+    const tasks = await store.list();
+    const boardTasks = tasks.filter((t) => String(t.boardId || '') === boardId);
+    const members = await boardMembers(board);
+
+    const columns = [
+      { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
+      { id: 'todo', label: 'To Do', color: 'cyan', hint: 'Ready to pick up' },
+      { id: 'progress', label: 'In Progress', color: 'violet', hint: 'Active execution' },
+      { id: 'review', label: 'In Review / QA', color: 'blue', hint: 'Validate and ship' },
+      { id: 'done', label: 'Done', color: 'green', hint: 'Verified outcomes' },
+    ];
+
+    const result = await chatWithContext(message, boardTasks, columns, members);
+    if (result.action?.type === 'create' || result.action?.type === 'create_many') {
+      const requestedTasks = result.action.type === 'create' ? [result.action] : result.action.tasks;
+      requestedTasks.forEach((item) => {
+        validateTaskInput(item, false);
+        item.assignee = resolveBoardAssignee(item.assignee, members);
+      });
+      const created = [];
+      for (const item of requestedTasks) {
+        let key;
+        do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+        created.push(await store.create({
+          key,
+          ownerId: userId(req),
+          boardId,
+          title: item.title.trim(),
+          description: item.description || '',
+          status: item.status,
+          priority: item.priority,
+          labels: [...new Set(item.labels || [])],
+          assignee: item.assignee,
+          dueDate: item.dueDate || '',
+          sprintId: null,
+          storyPoints: 0,
+          comments: [],
+          attachments: [],
+          dependencies: []
+        }));
+      }
+      result.action = { type: 'created_many', keys: created.map((item) => item.key) };
+      result.matchedTask = created.length === 1 ? { key: created[0].key, title: created[0].title, columnName: columns.find((column) => column.id === created[0].status).label } : null;
+      result.reply = `Created ${created.length} tasks on the board: ${created.map((item) => `#${item.key} “${item.title}”`).join(', ')}.`;
+    } else if (result.action?.type === 'update' || result.action?.type === 'update_many') {
+      const requestedUpdates = result.action.type === 'update' ? [result.action] : result.action.updates;
+      const prepared = requestedUpdates.map((item) => {
+        const task = boardTasks.find((candidate) => String(candidate.key) === String(item.key));
+        if (!task) throw createAuthError(404, `Task ${item.key} is no longer on the current board.`);
+        validateTaskInput(item.changes, true);
+        const changes = { ...item.changes };
+        if (changes.assignee !== undefined) changes.assignee = resolveBoardAssignee(changes.assignee, members);
+        if (changes.labels) changes.labels = [...new Set(changes.labels)];
+        if (changes.title !== undefined) changes.title = changes.title.trim();
+        return { task, changes };
+      });
+      const updated = [];
+      for (const item of prepared) updated.push(await store.update(item.task.key, item.changes));
+      result.action = { type: 'updated_many', keys: updated.map((item) => item.key), changes: prepared.map((item) => item.changes) };
+      result.matchedTask = updated.length === 1 ? { key: updated[0].key, title: updated[0].title, columnName: columns.find((column) => column.id === updated[0].status).label } : null;
+      result.reply = `Updated ${updated.length} tasks on the board.`;
+    }
+    res.json(result);
+  } catch (error) { next(error); }
 });
 
 app.use((error, _req, res, _next) => {
