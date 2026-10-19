@@ -7,9 +7,12 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Task } from './models/Task.js';
+import { TaskHistory } from './models/TaskHistory.js';
 import { Sprint } from './models/Sprint.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User } from './models/User.js';
+import { updateTaskStatus, createTaskWithHistory, applyStatusLifecycle } from './lib/taskService.js';
+import { convertDueDate, migrateLegacyFields } from './lib/taskMigration.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
@@ -64,6 +67,7 @@ function starterTasksFor(user) {
   ];
 }
 let memoryTasks = [];
+let memoryHistory = [];
 function seedSprint(ownerId) {
   const start = new Date(`${todayIsoDate()}T00:00:00Z`);
   start.setUTCDate(start.getUTCDate() - 3);
@@ -86,7 +90,17 @@ async function seedStarterTasks(user) {
   for (const template of starterTasksFor(user)) {
     let key;
     do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
-    await store.create({ key, ownerId: String(user._id), ...template, comments: [], attachments: [], dependencies: [] });
+    const assignedToSelf = template.assignee !== 'Unassigned';
+    const { date } = convertDueDate(template.dueDate, todayIsoDate());
+    await store.create({
+      key,
+      ownerId: String(user._id),
+      ...template,
+      assigneeId: assignedToSelf ? String(user._id) : null,
+      dueDate: date,
+      estimateHours: 0,
+      comments: [], attachments: [], dependencies: []
+    }, String(user._id), null);
   }
 }
 
@@ -107,18 +121,52 @@ async function connectMongo() {
 const store = {
   list: () => mongoReady ? Task.find().sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks),
   find: (key) => mongoReady ? Task.findOne({ key }) : Promise.resolve(memoryTasks.find((task) => task.key === key)),
-  create: async (data) => {
-    if (mongoReady) return new Task(data).save();
-    const task = { ...data, _id: crypto.randomUUID(), createdAt: new Date(), updatedAt: new Date() };
+  create: async (data, actorId = null, teamId = null) => {
+    if (mongoReady) {
+      const { task } = await createTaskWithHistory({ data, actorId, teamId: teamId ?? data.sprintId ?? null });
+      return task;
+    }
+    const now = new Date();
+    const task = { ...data, _id: crypto.randomUUID(), createdAt: now, updatedAt: now };
+    applyStatusLifecycle(task, task.status || 'backlog', now);
     memoryTasks = [...memoryTasks, task];
+    if (actorId) {
+      memoryHistory.push({ _id: crypto.randomUUID(), taskId: task._id, teamId: teamId ?? task.sprintId ?? null, from: null, to: task.status, actorId, at: now });
+    }
     return task;
   },
-  update: async (key, data) => {
-    if (mongoReady) return Task.findOneAndUpdate({ key }, { $set: data }, { new: true, runValidators: true });
+  update: async (key, data, actorId = null, teamId = null, requesterRole = 'member') => {
+    if (mongoReady) {
+      const existing = await Task.findOne({ key });
+      if (!existing) return null;
+      const { status: newStatus, ...rest } = data;
+      if (Object.keys(rest).length) await Task.updateOne({ key }, { $set: rest }, { runValidators: true });
+      if (newStatus !== undefined) {
+        // All status mutations are funneled through the centralized service.
+        await updateTaskStatus({
+          taskId: existing._id,
+          teamId: teamId ?? rest.sprintId ?? existing.sprintId ?? null,
+          newStatus,
+          actorId,
+          userId: actorId,
+          requesterRole
+        });
+      }
+      return Task.findOne({ key });
+    }
     const current = memoryTasks.find((task) => task.key === key);
     if (!current) return null;
-    memoryTasks = memoryTasks.map((task) => task.key === key ? { ...task, ...data, updatedAt: new Date() } : task);
-    return memoryTasks.find((task) => task.key === key);
+    const now = new Date();
+    const { status: newStatus, ...rest } = data;
+    const next = { ...current, ...rest, updatedAt: now };
+    if (newStatus !== undefined && newStatus !== current.status) {
+      applyStatusLifecycle(next, newStatus, now);
+      if (actorId) {
+        memoryHistory.push({ _id: crypto.randomUUID(), taskId: next._id, teamId: teamId ?? next.sprintId ?? null, from: current.status, to: newStatus, actorId, at: now });
+      }
+    }
+    memoryTasks = memoryTasks.map((task) => task.key === key ? next : task);
+    return next;
   },
   remove: async (key) => {
     if (mongoReady) return Task.deleteOne({ key });
@@ -191,14 +239,35 @@ function validateTaskInput(body, partial = false) {
   if (body.status !== undefined && !allowedStatuses.includes(body.status)) throw createAuthError(400, 'Invalid status.');
   if (body.priority !== undefined && !allowedPriorities.includes(body.priority)) throw createAuthError(400, 'Invalid priority.');
   if (body.labels !== undefined && (!Array.isArray(body.labels) || body.labels.length > 10 || body.labels.some((label) => typeof label !== 'string' || !label.trim() || label.length > 40))) throw createAuthError(400, 'Labels must be non-empty text values.');
-  if (body.assignee !== undefined && (typeof body.assignee !== 'string' || body.assignee.trim().length > 120)) throw createAuthError(400, 'Assignee must be text up to 120 characters.');
-  if (body.dueDate !== undefined && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
+  if (body.assignee !== undefined && body.assignee !== null && (typeof body.assignee !== 'string' || body.assignee.trim().length > 120)) throw createAuthError(400, 'Assignee must be text up to 120 characters.');
+  if (body.assigneeId !== undefined && body.assigneeId !== null && (typeof body.assigneeId !== 'string' || !/^[a-zA-Z0-9_-]{8,64}$/.test(body.assigneeId))) throw createAuthError(400, 'Invalid assignee id.');
+  if (body.dueDate !== undefined && body.dueDate !== null && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
+  if (body.estimateHours !== undefined && body.estimateHours !== null && (typeof body.estimateHours !== 'number' || !Number.isFinite(body.estimateHours) || body.estimateHours < 0 || body.estimateHours > 1000)) throw createAuthError(400, 'Estimate must be a number of hours from 0 to 1000.');
   if (body.sprintId !== undefined && (body.sprintId !== null && (typeof body.sprintId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.sprintId)))) throw createAuthError(400, 'Invalid sprint id.');
   if (body.storyPoints !== undefined && (!Number.isInteger(body.storyPoints) || body.storyPoints < 0 || body.storyPoints > 100)) throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
 }
 function validTaskKey(key) { return typeof key === 'string' && /^KAN-[A-Z0-9]+$/i.test(key); }
 function taskUpdates(body) {
-  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate', 'sprintId', 'storyPoints'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'assigneeId', 'dueDate', 'estimateHours', 'sprintId', 'storyPoints'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+}
+
+// Resolves an incoming assignee reference to the persisted pair
+// { assigneeId, assignee } (id + display name). Returns null when the
+// provided assigneeId does not correspond to a real user (HTTP 400 path).
+// Legacy clients may send only the display name; that keeps assigneeId null.
+async function resolveAssigneeFields(req, rawAssigneeId, legacyAssignee) {
+  if (rawAssigneeId !== undefined && rawAssigneeId !== null && rawAssigneeId !== '') {
+    const id = String(rawAssigneeId);
+    if (!mongoReady) {
+      // Without Mongo the signed-in user is the only known account.
+      if (id !== userId(req)) return null;
+      return { assigneeId: id, assignee: String(req.user.name || legacyAssignee || 'Unassigned').slice(0, 120) };
+    }
+    const user = await User.findById(id);
+    if (!user) return null;
+    return { assigneeId: user._id.toString(), assignee: String(user.name || 'Unassigned').slice(0, 120) };
+  }
+  return { assigneeId: null, assignee: String(legacyAssignee || 'Unassigned').slice(0, 120) };
 }
 function dependencyGraph(tasks) {
   const graph = new Map(tasks.map((task) => [task.key, (task.dependencies || []).map((dep) => dep.toTask)]));
@@ -350,7 +419,7 @@ app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
     const key = String(req.body?.key || '');
     const task = await store.find(key);
     if (!task || !canAccess(task, req)) return res.status(404).json({ error: 'Task not found.' });
-    const updated = await store.update(key, { sprintId: sprintId(sprint) });
+    const updated = await store.update(key, { sprintId: sprintId(sprint) }, userId(req), sprintId(sprint), req.role);
     res.status(201).json(updated);
   } catch (error) { next(error); }
 });
@@ -360,7 +429,7 @@ app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) =>
     if (!sprint) return;
     const task = await store.find(req.params.key);
     if (!task || !canAccess(task, req) || String(task.sprintId) !== sprintId(sprint)) return res.status(404).json({ error: 'Task not found in sprint.' });
-    await store.update(task.key, { sprintId: null });
+    await store.update(task.key, { sprintId: null }, userId(req), null, req.role);
     res.json({ ok: true });
   } catch (error) { next(error); }
 });
@@ -375,15 +444,21 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
     if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
+    const assigneeFields = await resolveAssigneeFields(req, req.body.assigneeId, req.body.assignee);
+    if (!assigneeFields) return res.status(400).json({ error: 'Invalid assignee id.' });
+    const due = convertDueDate(req.body.dueDate ?? '', todayIsoDate());
+    if (due.reason) return res.status(400).json({ error: `Due date could not be parsed: ${due.reason.replace('cannot parse: ', '')}.` });
     let key;
     do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
     const task = await store.create({
       key, ownerId: userId(req), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
       status: req.body.status || 'backlog', priority: req.body.priority || 'medium',
-      labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
-      dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
+      labels: [...new Set(req.body.labels || [])],
+      assignee: assigneeFields.assignee, assigneeId: assigneeFields.assigneeId,
+      dueDate: due.date, estimateHours: Number.isFinite(req.body.estimateHours) ? req.body.estimateHours : 0,
+      sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
       comments: [], attachments: [], dependencies: []
-    });
+    }, userId(req), req.body.sprintId || null);
     res.status(201).json(task);
   } catch (error) { next(error); }
 });
@@ -395,9 +470,24 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
     const updates = taskUpdates(req.body);
     if (updates.title !== undefined) updates.title = updates.title.trim();
-    if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
     if (updates.labels) updates.labels = [...new Set(updates.labels)];
-    res.json(await store.update(task.key, updates));
+    if (updates.assigneeId !== undefined || updates.assignee !== undefined) {
+      const assigneeFields = await resolveAssigneeFields(req, updates.assigneeId, updates.assignee);
+      if (!assigneeFields) return res.status(400).json({ error: 'Invalid assignee id.' });
+      updates.assigneeId = assigneeFields.assigneeId;
+      updates.assignee = assigneeFields.assignee;
+    }
+    if (updates.dueDate !== undefined) {
+      const due = convertDueDate(updates.dueDate, todayIsoDate());
+      if (due.reason) return res.status(400).json({ error: `Due date could not be parsed: ${due.reason.replace('cannot parse: ', '')}.` });
+      updates.dueDate = due.date;
+    }
+    if (updates.estimateHours !== undefined && updates.estimateHours !== null) updates.estimateHours = Number(updates.estimateHours);
+    // Status changes (and only status changes) flow through the centralized
+    // service inside store.update; everything else is a plain field update.
+    const updated = await store.update(task.key, updates, userId(req), task.sprintId ? String(task.sprintId) : null, req.role);
+    if (!updated) return res.status(404).json({ error: 'Task not found.' });
+    res.json(updated);
   } catch (error) { next(error); }
 });
 app.delete('/api/tasks/:key', requireAuth, async (req, res, next) => {
@@ -405,6 +495,65 @@ app.delete('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (!await authorizedTask(req, res)) return;
     const result = await store.remove(req.params.key);
     res.json({ ok: result.deletedCount === 1 });
+  } catch (error) { next(error); }
+});
+
+const historyChronological = (a, b) => new Date(a.at).getTime() - new Date(b.at).getTime();
+
+// J1: per-task status history (creation entry + every transition).
+app.get('/api/tasks/:key/history', requireAuth, async (req, res, next) => {
+  try {
+    const task = await authorizedTask(req, res);
+    if (!task) return;
+    if (mongoReady) {
+      return res.json(await TaskHistory.find({ taskId: task._id }).sort({ at: 1 }).lean());
+    }
+    res.json(memoryHistory
+      .filter((entry) => String(entry.taskId) === String(task._id))
+      .sort(historyChronological));
+  } catch (error) { next(error); }
+});
+
+// J1: team-wide history. "Team" maps to a sprint in this codebase, so the
+// id is validated and ownership is enforced through the sprint store.
+app.get('/api/teams/:teamId/history', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const sprint = await sprintStore.find(teamId, userId(req));
+    if (!sprint) return res.status(404).json({ error: 'Team not found.' });
+    if (mongoReady) {
+      return res.json(await TaskHistory.find({ teamId: sprint._id }).sort({ at: 1 }).lean());
+    }
+    const memberTaskIds = new Set((await store.listBySprint(sprintId(sprint))).map((task) => String(task._id)));
+    res.json(memoryHistory
+      .filter((entry) => String(entry.teamId) === String(teamId) || memberTaskIds.has(String(entry.taskId)))
+      .sort(historyChronological));
+  } catch (error) { next(error); }
+});
+
+// History is an audit trail: only admins may clear it.
+app.delete('/api/tasks/:key/history', requireAuth, async (req, res, next) => {
+  try {
+    const task = await authorizedTask(req, res);
+    if (!task) return;
+    if (req.role !== 'admin') return res.status(403).json({ error: 'Only admins may clear task history.' });
+    if (mongoReady) {
+      await TaskHistory.deleteMany({ taskId: task._id });
+    } else {
+      memoryHistory = memoryHistory.filter((entry) => String(entry.taskId) !== String(task._id));
+    }
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+// J2 maintenance endpoint: converts legacy assignee/due-date values in place.
+// Idempotent, so it is safe to run repeatedly (e.g. after restores).
+app.post('/api/admin/migrate-tasks', requireAuth, async (req, res, next) => {
+  try {
+    if (req.role !== 'admin') return res.status(403).json({ error: 'Only admins may run maintenance migrations.' });
+    if (!mongoReady) return res.status(503).json({ error: 'Migration requires a MongoDB connection.' });
+    res.json(await migrateLegacyFields());
   } catch (error) { next(error); }
 });
 
@@ -550,5 +699,5 @@ if (process.env.NODE_ENV === 'production') {
   app.get('*', (_req, res) => res.sendFile(path.join(__dirname, '../../frontend/dist/index.html')));
 }
 
-export { app, connectMongo, memoryTasks, sessions };
+export { app, connectMongo, memoryTasks, memoryHistory, sessions };
 connectMongo().then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)));
