@@ -18,3 +18,4 @@ frontend/.env.*
 *.bson
 dump/
 backend/dump/
+frontend/dist/assets
