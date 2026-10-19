@@ -10,7 +10,8 @@
     "db:check": "node scripts/db.js check",
     "db:seed": "node scripts/db.js seed",
     "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/lib/dbConfig.test.js && node server/lib/profileApi.test.js",
-    "test:db": "node server/lib/profileDb.test.js"
+    "test:db": "node server/lib/profileDb.test.js",
+    "test:ai": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/ai.test.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -18,6 +19,7 @@
     "dotenv": "^16.6.1",
     "express": "latest",
     "mongoose": "latest",
-    "multer": "^2.4.0"
+    "multer": "^2.4.0",
+    "openai": "^7.34.0"
   }
 }

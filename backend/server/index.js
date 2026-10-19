@@ -11,12 +11,15 @@ import { Sprint } from './models/Sprint.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
 import { connectDatabase, databaseStatus } from './db.js';
+import { Board } from './models/Board.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
   createResetToken, consumeResetToken, memoryUsers, hashPassword, setDatabaseReady,
-  refreshSessionUser, serializeUser, sessions
+  refreshSessionUser, serializeUser, sessions,
+  findUserByEmail, findUserById
 } from './auth.js';
+import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -29,6 +32,7 @@ const allowedPriorities = ['urgent', 'high', 'medium', 'low'];
 const rateLimits = new Map();
 let mongoReady = false;
 let memorySprints = [];
+let memoryBoards = [];
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(express.json({ limit: '150kb' }));
@@ -65,7 +69,7 @@ function starterTasksFor(user) {
   ];
 }
 let memoryTasks = [];
-function seedSprint(ownerId) {
+function seedSprint(ownerId, boardId = null) {
   const start = new Date(`${todayIsoDate()}T00:00:00Z`);
   start.setUTCDate(start.getUTCDate() - 3);
   const startDate = start.toISOString().slice(0, 10);
@@ -75,42 +79,28 @@ function seedSprint(ownerId) {
     startDate,
     endDate: endDateForStart(startDate),
     ownerId: String(ownerId),
+    boardId: boardId ? String(boardId) : null,
     createdAt: new Date()
   };
 }
 const sprintId = (sprint) => String(sprint._id ?? sprint.id);
+const boardId = (board) => String(board._id ?? board.id);
 let memorySprintCounter = 0;
 function withSprintId(sprint) {
   return sprint._id ? sprint : { ...sprint, _id: `mem-sprint-${Date.now()}-${++memorySprintCounter}` };
 }
-// Task keys are globally unique. With five developers on one database a random key can
-// collide, so retry the insert instead of returning a 500 to the person creating work.
-async function createTaskWithFreshKey(data) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const key = `KAN-${crypto.randomInt(1000, 10000)}`;
-    try {
-      return await store.create({ ...data, key });
-    } catch (error) {
-      if (error?.code !== 11000) throw error;
-    }
-  }
-  throw createAuthError(503, 'Could not allocate a task key. Please try again.');
-}
-
-async function seedStarterTasks(user) {
+async function seedStarterTasks(user, board) {
   for (const template of starterTasksFor(user)) {
-    await createTaskWithFreshKey({ ownerId: String(user._id), ...template, comments: [], attachments: [], dependencies: [] });
+    let key;
+    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+    await store.create({ key, ownerId: String(user._id), boardId: boardId(board), ...template, comments: [], attachments: [], dependencies: [] });
   }
 }
 
 async function connectMongo() {
   const status = await connectDatabase();
-  if (status.mode === 'mongodb') {
-    mongoReady = true;
-    setDatabaseReady(true);
-  } else {
-    console.warn('[db] ALLOW_MEMORY_DB is enabled: data lives in RAM only and is neither shared nor persisted.');
-  }
+  mongoReady = status.mode === 'mongodb';
+  setDatabaseReady(mongoReady);
   return status;
 }
 
@@ -168,6 +158,58 @@ const sprintStore = {
   }
 };
 
+const boardStore = {
+  list: (userId) => mongoReady
+    ? Board.find({ $or: [{ ownerId: userId }, { memberIds: userId }] }).sort({ createdAt: 1 }).lean()
+    : Promise.resolve(memoryBoards.filter((board) => String(board.ownerId) === String(userId) || (board.memberIds || []).includes(String(userId)))),
+  find: (id) => mongoReady ? Board.findById(id).lean() : Promise.resolve(memoryBoards.find((board) => boardId(board) === String(id))),
+  create: async (data) => {
+    if (mongoReady) return new Board(data).save();
+    const board = { ...data, _id: `mem-board-${Date.now()}-${crypto.randomUUID()}`, createdAt: new Date() };
+    memoryBoards = [...memoryBoards, board];
+    return board;
+  },
+  update: async (id, data) => {
+    if (mongoReady) return Board.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true }).lean();
+    const current = await boardStore.find(id);
+    if (!current) return null;
+    memoryBoards = memoryBoards.map((board) => boardId(board) === String(id) ? { ...board, ...data } : board);
+    return boardStore.find(id);
+  },
+  remove: async (id) => {
+    if (mongoReady) return Board.deleteOne({ _id: id });
+    const before = memoryBoards.length;
+    memoryBoards = memoryBoards.filter((board) => boardId(board) !== String(id));
+    return { deletedCount: before - memoryBoards.length };
+  }
+};
+
+async function createDefaultBoard(user) {
+  return boardStore.create({ ownerId: String(user._id), memberIds: [String(user._id)], name: `${user.name || 'My'}'s board` });
+}
+
+async function authorizedBoard(req, res, options = {}) {
+  const id = String(req.params.id || '');
+  if (!/^[a-zA-Z0-9_-]{8,}$/.test(id)) {
+    res.status(400).json({ error: 'Invalid board id.' });
+    return null;
+  }
+  const board = await boardStore.find(id);
+  if (!board) { res.status(404).json({ error: 'Board not found.' }); return null; }
+  const member = String(board.ownerId) === userId(req) || (board.memberIds || []).map(String).includes(userId(req));
+  if (!member) { res.status(403).json({ error: 'You do not have access to this board.' }); return null; }
+  if (options.ownerOnly && String(board.ownerId) !== userId(req)) {
+    res.status(403).json({ error: 'Only the board owner may perform this action.' });
+    return null;
+  }
+  return board;
+}
+
+async function defaultBoardFor(req) {
+  const boards = await boardStore.list(userId(req));
+  return boards[0] || null;
+}
+
 async function ensureDefaultSprint(ownerId) {
   const existing = await sprintStore.list(ownerId);
   if (existing.length) return existing[0];
@@ -195,12 +237,33 @@ async function authorizedSprint(req, res) {
 }
 
 function userId(req) { return String(req.user._id); }
-function canAccess(task, req) { return String(task.ownerId) === userId(req) || req.role === 'admin'; }
+async function boardMembers(board) {
+  const members = await Promise.all((board.memberIds || []).map((id) => findUserById(id)));
+  return members.filter(Boolean).map((member) => ({
+    id: String(member._id),
+    name: String(member.name || member.email),
+    email: String(member.email)
+  }));
+}
+function resolveBoardAssignee(value, members) {
+  const requested = String(value || 'Unassigned').trim();
+  if (!requested || requested.toLowerCase() === 'unassigned') return 'Unassigned';
+  const match = members.find((member) => member.email.toLowerCase() === requested.toLowerCase()
+    || member.name.toLowerCase() === requested.toLowerCase());
+  if (!match) throw createAuthError(400, `Assignee "${requested}" is not a member of this board.`);
+  return match.name;
+}
+async function canAccess(task, req) {
+  if (req.role === 'admin' || String(task.ownerId) === userId(req)) return true;
+  if (!task.boardId) return false;
+  const board = await boardStore.find(task.boardId);
+  return Boolean(board && ((board.memberIds || []).map(String).includes(userId(req)) || String(board.ownerId) === userId(req)));
+}
 async function authorizedTask(req, res) {
   if (!validTaskKey(req.params.key)) { res.status(400).json({ error: 'Invalid task key.' }); return null; }
   const task = await store.find(req.params.key);
   if (!task) { res.status(404).json({ error: 'Task not found.' }); return null; }
-  if (!canAccess(task, req)) { res.status(403).json({ error: 'You do not have access to this task.' }); return null; }
+  if (!await canAccess(task, req)) { res.status(403).json({ error: 'You do not have access to this task.' }); return null; }
   return task;
 }
 function validateTaskInput(body, partial = false) {
@@ -422,7 +485,8 @@ app.get('/api/health', (_req, res) => {
 app.post('/api/auth/signup', async (req, res, next) => {
   try {
     const user = await createUser(req.body || {});
-    await seedStarterTasks(user);
+    const board = await createDefaultBoard(user);
+    await seedStarterTasks(user, board);
     res.status(201).json(user);
   } catch (error) { next(error); }
 });
@@ -438,6 +502,69 @@ app.post('/api/auth/signout', requireAuth, async (req, res, next) => {
   try { await invalidateSession(req.authToken); res.json({ ok: true }); } catch (error) { next(error); }
 });
 app.get('/api/auth/current', requireAuth, (req, res) => res.json(req.user));
+
+app.get('/api/boards', requireAuth, async (req, res, next) => {
+  try {
+    const boards = await boardStore.list(userId(req));
+    res.json(await Promise.all(boards.map(async (board) => ({
+      ...board,
+      id: boardId(board),
+      isOwner: String(board.ownerId) === userId(req),
+      memberIds: (board.memberIds || []).map(String),
+      members: await boardMembers(board)
+    }))));
+  } catch (error) { next(error); }
+});
+app.post('/api/boards', requireAuth, async (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Board name must be between 1 and 120 characters.' });
+    const board = await boardStore.create({ ownerId: userId(req), memberIds: [userId(req)], name });
+    res.status(201).json({ ...board, id: boardId(board), isOwner: true });
+  } catch (error) { next(error); }
+});
+app.patch('/api/boards/:id', requireAuth, async (req, res, next) => {
+  try {
+    const board = await authorizedBoard(req, res, { ownerOnly: true });
+    if (!board) return;
+    const name = String(req.body?.name || '').trim();
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Board name must be between 1 and 120 characters.' });
+    const updated = await boardStore.update(boardId(board), { name });
+    res.json({ ...updated, id: boardId(updated), isOwner: true });
+  } catch (error) { next(error); }
+});
+app.delete('/api/boards/:id', requireAuth, async (req, res, next) => {
+  try {
+    const board = await authorizedBoard(req, res, { ownerOnly: true });
+    if (!board) return;
+    const result = await boardStore.remove(boardId(board));
+    if (mongoReady) await Task.deleteMany({ boardId: boardId(board) });
+    else memoryTasks = memoryTasks.filter((task) => String(task.boardId) !== boardId(board));
+    res.json({ ok: result.deletedCount === 1 });
+  } catch (error) { next(error); }
+});
+app.post('/api/boards/:id/members', requireAuth, async (req, res, next) => {
+  try {
+    const board = await authorizedBoard(req, res, { ownerOnly: true });
+    if (!board) return;
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const member = await findUserByEmail(email);
+    if (!member) return res.status(404).json({ error: 'No account was found for that email.' });
+    const memberId = String(member._id);
+    const memberIds = [...new Set([...(board.memberIds || []).map(String), memberId])];
+    const updated = await boardStore.update(boardId(board), { memberIds });
+    res.status(201).json({ ...updated, id: boardId(updated), isOwner: true });
+  } catch (error) { next(error); }
+});
+app.delete('/api/boards/:id/members/:memberId', requireAuth, async (req, res, next) => {
+  try {
+    const board = await authorizedBoard(req, res, { ownerOnly: true });
+    if (!board) return;
+    if (String(req.params.memberId) === userId(req)) return res.status(400).json({ error: 'The board owner cannot be removed.' });
+    const updated = await boardStore.update(boardId(board), { memberIds: (board.memberIds || []).map(String).filter((id) => id !== String(req.params.memberId)) });
+    res.json({ ...updated, id: boardId(updated), isOwner: true });
+  } catch (error) { next(error); }
+});
 app.post('/api/auth/reset-password/request', async (req, res, next) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -521,13 +648,13 @@ app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
     const sprint = await authorizedSprint(req, res);
     if (!sprint) return;
     const tasks = await store.listBySprint(sprintId(sprint));
-    res.json(tasks.filter((task) => canAccess(task, req)));
+    res.json((await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean));
   } catch (error) { next(error); }
 });
 app.get('/api/backlog', requireAuth, async (req, res, next) => {
   try {
-    const tasks = await store.listWithoutSprint(req.role === 'admin' ? null : userId(req));
-    res.json(tasks);
+    const tasks = await store.listWithoutSprint();
+    res.json((await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean));
   } catch (error) { next(error); }
 });
 app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
@@ -536,7 +663,7 @@ app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
     if (!sprint) return;
     const key = String(req.body?.key || '');
     const task = await store.find(key);
-    if (!task || !canAccess(task, req)) return res.status(404).json({ error: 'Task not found.' });
+    if (!task || !(await canAccess(task, req))) return res.status(404).json({ error: 'Task not found.' });
     const updated = await store.update(key, { sprintId: sprintId(sprint) });
     res.status(201).json(updated);
   } catch (error) { next(error); }
@@ -546,7 +673,7 @@ app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) =>
     const sprint = await authorizedSprint(req, res);
     if (!sprint) return;
     const task = await store.find(req.params.key);
-    if (!task || !canAccess(task, req) || String(task.sprintId) !== sprintId(sprint)) return res.status(404).json({ error: 'Task not found in sprint.' });
+    if (!task || !(await canAccess(task, req)) || String(task.sprintId) !== sprintId(sprint)) return res.status(404).json({ error: 'Task not found in sprint.' });
     await store.update(task.key, { sprintId: null });
     res.json({ ok: true });
   } catch (error) { next(error); }
@@ -554,16 +681,22 @@ app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) =>
 
 app.get('/api/tasks', requireAuth, async (req, res, next) => {
   try {
-    const tasks = req.role === 'admin' ? await store.list() : await store.listByOwner(userId(req));
-    res.json(tasks);
+    const tasks = await store.list();
+    const board = req.query.boardId ? await authorizedBoard({ ...req, params: { id: req.query.boardId } }, res) : await defaultBoardFor(req);
+    if (!board) return res.json([]);
+    res.json((await Promise.all(tasks.map(async (task) => String(task.boardId || '') === boardId(board) && (await canAccess(task, req)) ? task : null))).filter(Boolean));
   } catch (error) { next(error); }
 });
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
+    const board = req.body.boardId ? await authorizedBoard({ ...req, params: { id: req.body.boardId } }, res) : await defaultBoardFor(req);
+    if (!board) return res.status(404).json({ error: 'Create a board before adding tasks.' });
     if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
-    const task = await createTaskWithFreshKey({
-      ownerId: userId(req), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
+    let key;
+    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+    const task = await store.create({
+      key, ownerId: userId(req), boardId: boardId(board), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
       status: req.body.status || 'backlog', priority: req.body.priority || 'medium',
       labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
       dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
@@ -697,7 +830,7 @@ app.post('/api/tasks/:key/dependencies', requireAuth, async (req, res, next) => 
     const dependsOn = String(req.body?.dependsOn || '').trim();
     const prerequisite = await store.find(dependsOn);
     if (!prerequisite) return res.status(404).json({ error: 'Dependency task not found.' });
-    if (!canAccess(prerequisite, req)) return res.status(403).json({ error: 'You do not have access to the dependency task.' });
+    if (!await canAccess(prerequisite, req)) return res.status(403).json({ error: 'You do not have access to the dependency task.' });
     if (task.key === dependsOn) return res.status(400).json({ error: 'A task cannot depend on itself.' });
     if ((task.dependencies || []).some((dep) => dep.toTask === dependsOn)) return res.status(409).json({ error: 'This dependency already exists.' });
     const tasks = await store.list();
@@ -723,6 +856,82 @@ app.get('/api/tasks/:key/blocked', requireAuth, async (req, res, next) => {
   try { const task = await authorizedTask(req, res); if (task) { const tasks = await store.list(); res.json({ blocked: blockedTask(task, tasks), blockers: (task.dependencies || []).filter((dep) => tasks.find((item) => item.key === dep.toTask)?.status !== 'done').map((dep) => dep.toTask) }); } } catch (error) { next(error); }
 });
 
+app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
+  try {
+    const boardId = String(req.body?.boardId || '').trim();
+    const message = String(req.body?.message || '').trim();
+    if (!boardId || !message) return res.status(400).json({ error: 'boardId and message are required.' });
+    if (message.length > MAX_MESSAGE_LENGTH) return res.status(400).json({ error: `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer.` });
+
+    const board = await authorizedBoard({ ...req, params: { id: boardId } }, res);
+    if (!board) return;
+
+    const tasks = await store.list();
+    const boardTasks = tasks.filter((t) => String(t.boardId || '') === boardId);
+    const members = await boardMembers(board);
+
+    const columns = [
+      { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
+      { id: 'todo', label: 'To Do', color: 'cyan', hint: 'Ready to pick up' },
+      { id: 'progress', label: 'In Progress', color: 'violet', hint: 'Active execution' },
+      { id: 'review', label: 'In Review / QA', color: 'blue', hint: 'Validate and ship' },
+      { id: 'done', label: 'Done', color: 'green', hint: 'Verified outcomes' },
+    ];
+
+    const result = await chatWithContext(message, boardTasks, columns, members);
+    if (result.action?.type === 'create' || result.action?.type === 'create_many') {
+      const requestedTasks = result.action.type === 'create' ? [result.action] : result.action.tasks;
+      requestedTasks.forEach((item) => {
+        validateTaskInput(item, false);
+        item.assignee = resolveBoardAssignee(item.assignee, members);
+      });
+      const created = [];
+      for (const item of requestedTasks) {
+        let key;
+        do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+        created.push(await store.create({
+          key,
+          ownerId: userId(req),
+          boardId,
+          title: item.title.trim(),
+          description: item.description || '',
+          status: item.status,
+          priority: item.priority,
+          labels: [...new Set(item.labels || [])],
+          assignee: item.assignee,
+          dueDate: item.dueDate || '',
+          sprintId: null,
+          storyPoints: 0,
+          comments: [],
+          attachments: [],
+          dependencies: []
+        }));
+      }
+      result.action = { type: 'created_many', keys: created.map((item) => item.key) };
+      result.matchedTask = created.length === 1 ? { key: created[0].key, title: created[0].title, columnName: columns.find((column) => column.id === created[0].status).label } : null;
+      result.reply = `Created ${created.length} tasks on the board: ${created.map((item) => `#${item.key} “${item.title}”`).join(', ')}.`;
+    } else if (result.action?.type === 'update' || result.action?.type === 'update_many') {
+      const requestedUpdates = result.action.type === 'update' ? [result.action] : result.action.updates;
+      const prepared = requestedUpdates.map((item) => {
+        const task = boardTasks.find((candidate) => String(candidate.key) === String(item.key));
+        if (!task) throw createAuthError(404, `Task ${item.key} is no longer on the current board.`);
+        validateTaskInput(item.changes, true);
+        const changes = { ...item.changes };
+        if (changes.assignee !== undefined) changes.assignee = resolveBoardAssignee(changes.assignee, members);
+        if (changes.labels) changes.labels = [...new Set(changes.labels)];
+        if (changes.title !== undefined) changes.title = changes.title.trim();
+        return { task, changes };
+      });
+      const updated = [];
+      for (const item of prepared) updated.push(await store.update(item.task.key, item.changes));
+      result.action = { type: 'updated_many', keys: updated.map((item) => item.key), changes: prepared.map((item) => item.changes) };
+      result.matchedTask = updated.length === 1 ? { key: updated[0].key, title: updated[0].title, columnName: columns.find((column) => column.id === updated[0].status).label } : null;
+      result.reply = `Updated ${updated.length} tasks on the board.`;
+    }
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Attachment is invalid or too large.' });
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
@@ -740,6 +949,6 @@ export { app, connectMongo, memoryTasks, sessions };
 connectMongo()
   .then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)))
   .catch((error) => {
-    console.error(`[db] ${error.message}`);
-    process.exit(1);
+    console.error(error.message);
+    process.exitCode = 1;
   });
