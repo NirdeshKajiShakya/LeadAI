@@ -13,6 +13,7 @@ backend/.env.*
 frontend/.env
 frontend/.env.*
 !frontend/.env.example
+.github
 # Database dumps and exports belong in the shared database, not in Git.
 *.bson
 dump/
