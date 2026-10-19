@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Plus, Search, Settings2,
-  Sparkles, Target, Users, X, Zap
+  Sparkles, Target, UserRound, Users, X, Zap
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
+import { ProfileEditPage, ProfilePage } from './Profile.jsx';
 
 const columns = [
   { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
@@ -86,6 +87,10 @@ function App() {
   const inFlight = tasks.filter((task) => task.status === 'progress').length;
   const completionRate = tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
   const workspaceName = user?.name ? `${user.name}'s workspace` : 'My workspace';
+
+  function updateProfileUser(profile) {
+    setUser((current) => ({ ...(current || {}), ...profile }));
+  }
 
   async function updateTask(key, data) {
     setTasks((current) => current.map((task) => task.key === key ? { ...task, ...data } : task));
@@ -195,19 +200,19 @@ function App() {
       <div className="workspace-picker"><span className="workspace-dot"></span> {user ? `${user.name}'s workspace` : 'My workspace'} <ChevronDown size={13} /></div>
       <div className="topbar-actions">
         <label className="global-search"><Search size={15} /><input placeholder="Search tasks, comments, agents..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" onClick={() => navigate('/profile')}>{initialsOf(user?.name)}<span></span></button>
+        <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
       </div>
     </header>
     <div className="workspace-layout">
       <aside className="sidebar">
         <div className="mobile-menu"><Menu size={18} /></div>
         <div className="nav-section"><div className="nav-label">Workspace</div><NavItem active={pathname === '/'} onClick={() => navigate('/')} icon={<LayoutGrid size={15} />} label="Home" /><NavItem active={pathname === '/board'} onClick={() => navigate('/board')} icon={<Target size={15} />} label="Kanban Board" badge="Live" /><NavItem active={pathname === '/backlog'} onClick={() => navigate('/backlog')} icon={<List size={15} />} label="Sprint Backlog" /></div>
-        <div className="nav-section"><div className="nav-label">Operations</div><NavItem active={pathname === '/automations'} onClick={() => navigate('/automations')} icon={<Sparkles size={15} />} label="Automations" /><NavItem active={pathname === '/team'} onClick={() => navigate('/team')} icon={<Users size={15} />} label="Team & Workspace" /><NavItem active={pathname === '/settings'} onClick={() => navigate('/settings')} icon={<Settings2 size={15} />} label="Settings" /></div>
+        <div className="nav-section"><div className="nav-label">Operations</div><NavItem active={pathname === '/automations'} onClick={() => navigate('/automations')} icon={<Sparkles size={15} />} label="Automations" /><NavItem active={pathname === '/team'} onClick={() => navigate('/team')} icon={<Users size={15} />} label="Team & Workspace" /><NavItem active={pathname === '/settings'} onClick={() => navigate('/settings')} icon={<Settings2 size={15} />} label="Settings" /><NavItem active={pathname === '/profile' || pathname === '/profile/edit'} onClick={() => navigate('/profile')} icon={<UserRound size={15} />} label="Profile" /></div>
         <div className="sidebar-footer"><div className="quota-copy"><span>Tasks on your board</span><strong>{tasks.length} total</strong></div><div className="quota-bar"><span></span></div><div className="ai-active"><span></span> AI Copilot Active <Zap size={14} /></div></div>
       </aside>
       <main className="main-content">
         {authError && <div className="form-error" role="alert">{authError}<button type="button" onClick={() => setAuthError('')} aria-label="Dismiss error"><X size={13} /></button></div>}
-        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} /> : <>
+        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} /> : <>
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
         <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{user?.name ? `${user.name}'s board` : 'My board'}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(true)}><Bolt size={15} /> AI Auto-Triage</button><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>

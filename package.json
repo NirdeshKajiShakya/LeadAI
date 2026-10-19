@@ -9,6 +9,8 @@
     "dev:frontend": "npm --prefix frontend run client",
     "install:all": "npm install && npm --prefix backend install && npm --prefix frontend install",
     "build": "npm --prefix frontend run build",
+    "test": "npm --prefix backend test",
+    "test:db": "npm --prefix backend run test:db",
     "start": "NODE_ENV=production node backend/server/index.js"
   },
   "devDependencies": {

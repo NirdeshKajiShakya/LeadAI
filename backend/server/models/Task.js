@@ -40,4 +40,8 @@ const taskSchema = new mongoose.Schema({
   dependencies: { type: [dependencySchema], default: [] }
 }, { timestamps: true });
 
+// Shared databases serve every developer, so the board and sprint queries must hit indexes.
+taskSchema.index({ ownerId: 1, createdAt: 1 });
+taskSchema.index({ sprintId: 1 });
+
 export const Task = mongoose.model('Task', taskSchema);

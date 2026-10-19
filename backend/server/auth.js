@@ -99,6 +99,14 @@ export async function authenticateUser({ email, password }) {
   return user;
 }
 
+// Profile edits must show up in the current tab (and any other signed-in tab) without a re-login.
+export function refreshSessionUser(user) {
+  const serialized = serializeUser(user);
+  for (const session of sessions.values()) {
+    if (String(session.user._id) === String(serialized._id)) session.user = serialized;
+  }
+}
+
 export function createAuthSession(user) {
   const token = randomToken();
   const expiresAt = Date.now() + SESSION_TTL_MS;

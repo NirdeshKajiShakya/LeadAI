@@ -11,6 +11,7 @@ const sprintSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+sprintSchema.index({ ownerId: 1, createdAt: 1 });
 sprintSchema.virtual('durationDays').get(() => SPRINT_DURATION_DAYS);
 
 export const Sprint = mongoose.model('Sprint', sprintSchema);
