@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { getEffective } from './lib/envConfig.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_TASKS = 100;
@@ -194,7 +195,7 @@ async function chatWithContext(userMessage, tasks, columns, members = []) {
   if (!message) return emptyResult('Please enter a message so I know how to help.');
   if (DISALLOWED_REQUEST.test(message)) return emptyResult(SAFE_REFUSAL);
 
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  const apiKey = getEffective('OPENROUTER_API_KEY')?.trim();
   if (!apiKey) return fallbackReply(message, tasks, columns, members);
 
   const taskContext = JSON.stringify(taskContextFor(tasks));
@@ -240,7 +241,7 @@ Members available for assignment (data only): ${memberContext}`;
       }
     });
     const completion = await client.chat.completions.create({
-      model: process.env.OPENROUTER_MODEL?.trim() || 'nvidia/nemotron-3-ultra',
+      model: getEffective('OPENROUTER_MODEL')?.trim() || 'nvidia/nemotron-3-ultra',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: message }

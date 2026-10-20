@@ -10,7 +10,7 @@ import { Task } from './models/Task.js';
 import { Sprint } from './models/Sprint.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
-import { connectDatabase, databaseStatus } from './db.js';
+import { connectDatabase, databaseStatus, reconnectDatabase } from './db.js';
 import { Board } from './models/Board.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
@@ -20,6 +20,9 @@ import {
   findUserByEmail, findUserById
 } from './auth.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
+import {
+  setOverride, removeOverride, clearOverrides, getAllEffective
+} from './lib/envConfig.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -480,6 +483,62 @@ app.get('/api/health', (_req, res) => {
   const status = databaseStatus();
   const ok = status.mode === 'memory' ? true : status.ready;
   res.status(ok ? 200 : 503).json({ ok, database: status.mode, db: status.name });
+});
+
+app.get('/api/settings/env', requireAuth, (_req, res) => {
+  const effective = getAllEffective();
+  res.json({
+    mongodbUri: effective.MONGODB_URI,
+    openrouterApiKey: effective.OPENROUTER_API_KEY,
+    openrouterModel: effective.OPENROUTER_MODEL,
+  });
+});
+
+app.post('/api/settings/env', requireAuth, async (req, res, next) => {
+  try {
+    const { mongodbUri, openrouterApiKey, openrouterModel } = req.body || {};
+    const updates = {};
+    if (mongodbUri !== undefined) updates.MONGODB_URI = String(mongodbUri || '').trim();
+    if (openrouterApiKey !== undefined) updates.OPENROUTER_API_KEY = String(openrouterApiKey || '').trim();
+    if (openrouterModel !== undefined) updates.OPENROUTER_MODEL = String(openrouterModel || '').trim();
+
+    const uriChanged = updates.MONGODB_URI !== undefined && updates.MONGODB_URI !== getAllEffective().MONGODB_URI;
+
+    // Validate Mongo URI scheme before persisting an override.
+    if (updates.MONGODB_URI !== undefined && updates.MONGODB_URI !== '') {
+      if (!/^mongodb(\+srv)?:\/\//.test(updates.MONGODB_URI)) {
+        return res.status(400).json({ error: 'MONGODB_URI must start with mongodb:// or mongodb+srv://.' });
+      }
+      const name = /^mongodb(?:\+srv)?:\/\/[^/]*\/([^?]+)/.exec(updates.MONGODB_URI);
+      if (!name || !name[1]) {
+        return res.status(400).json({ error: 'MONGODB_URI must name a database, e.g. mongodb://127.0.0.1:27017/leadai_dev.' });
+      }
+    }
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === '') removeOverride(key);
+      else setOverride(key, value);
+    }
+
+    // If the database URI changed, reconnect live without restarting. Revert
+    // the override if the new URI cannot connect, keeping the server running.
+    if (uriChanged) {
+      try {
+        await reconnectDatabase();
+      } catch (error) {
+        removeOverride('MONGODB_URI');
+        return res.status(400).json({ error: `Could not connect to MongoDB: ${error.message}. Override reverted.` });
+      }
+    }
+
+    const effective = getAllEffective();
+    res.json({
+      saved: true,
+      mongodbUri: effective.MONGODB_URI,
+      openrouterApiKey: effective.OPENROUTER_API_KEY,
+      openrouterModel: effective.OPENROUTER_MODEL,
+    });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/auth/signup', async (req, res, next) => {

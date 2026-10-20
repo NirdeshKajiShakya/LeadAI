@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { getEffective } from './lib/envConfig.js';
 
 // Only an explicit opt-in (or the unit-test script) may use RAM storage.
 // Silent fallback is what made every developer's data differ and vanish.
@@ -25,7 +26,7 @@ export function parseDatabaseName(uri) {
 }
 
 export async function connectDatabase() {
-  const uri = String(process.env.MONGODB_URI || '').trim();
+  const uri = String(getEffective('MONGODB_URI')).trim();
   if (!uri) {
     if (memoryAllowed()) {
       mode = 'memory';
@@ -57,4 +58,9 @@ export async function connectDatabase() {
 
 export async function disconnectDatabase() {
   await mongoose.disconnect();
+}
+
+export async function reconnectDatabase() {
+  await disconnectDatabase();
+  return connectDatabase();
 }
