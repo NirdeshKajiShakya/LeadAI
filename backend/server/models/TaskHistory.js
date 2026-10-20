@@ -9,9 +9,9 @@ const taskHistorySchema = new mongoose.Schema(
       index: true
     },
     teamId: {
-      // Team == sprint in this codebase; tasks outside a sprint have none.
+      // Team == the enduring workspace (a sprint belongs to a team).
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Sprint',
+      ref: 'Team',
       default: null,
       index: true
     },

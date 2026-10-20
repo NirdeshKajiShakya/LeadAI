@@ -39,6 +39,8 @@ const taskSchema = new mongoose.Schema({
   estimateHours: { type: Number, default: 0, min: 0, max: 1000 },
   aiSuggested: { type: Boolean, default: false },
   sprintId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sprint', default: null },
+  // The team this task belongs to. Tasks created outside a team have null.
+  teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null, index: true },
   storyPoints: { type: Number, default: 0, min: 0, max: 100 },
   startedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },

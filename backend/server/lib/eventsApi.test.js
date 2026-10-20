@@ -167,7 +167,7 @@ try {
 
   // ---- member.joined ----------------------------------------------------------
 
-  const joined = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ memberId: userB._id }) });
+  const joined = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: userB._id }) });
   await check('successful membership addition emits member.joined once', () => {
     assert.equal(joined.status, 201);
     const seen = eventsOf(EVENTS.MEMBER_JOINED);
@@ -180,13 +180,13 @@ try {
     assert.ok(payload.at instanceof Date);
   });
 
-  const duplicateJoin = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ memberId: userB._id }) });
+  const duplicateJoin = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: userB._id }) });
   await check('adding an existing member emits no duplicate join event', () => {
     assert.equal(duplicateJoin.status, 409);
     assert.equal(eventsOf(EVENTS.MEMBER_JOINED).length, 1, 'count unchanged');
   });
 
-  const badJoin = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ memberId: 'nope' }) });
+  const badJoin = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: 'nope' }) });
   await check('a failed membership addition emits no join event', () => {
     assert.equal(badJoin.status, 400);
     assert.equal(eventsOf(EVENTS.MEMBER_JOINED).length, 1, 'count unchanged');
@@ -216,7 +216,7 @@ try {
 
   // ---- self-removal (leaver is the actor) -------------------------------------
 
-  const rejoined = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ memberId: userB._id }) });
+  const rejoined = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: userB._id }) });
   assert.equal(rejoined.status, 201);
   globalThis.authToken = signInB.body.token;
   const selfLeave = await api(`/teams/${teamId}/members/${userB._id}`, { method: 'DELETE' });

@@ -1,0 +1,11 @@
+const fs = require('fs');
+const path = require('path');
+const root = 'c:/Users/LeathLOQ/Desktop/LEADAI/LeadAI/backend/server';
+const src = fs.readFileSync(path.join(root, 'index.js'), 'utf8');
+const i = src.indexOf('findTeamForMembership');
+console.log('idx', i);
+const before = src.slice(0, i);
+const defIdx = before.lastIndexOf('findTeamForMembership');
+console.log('definition idx (relative to start)', defIdx);
+console.log('--- def context ---');
+console.log(before.slice(Math.max(0, defIdx - 200), defIdx + 300));

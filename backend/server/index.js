@@ -9,11 +9,15 @@ import fs from 'node:fs';
 import { Task } from './models/Task.js';
 import { TaskHistory } from './models/TaskHistory.js';
 import { Sprint } from './models/Sprint.js';
+import { Team } from './models/Team.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User } from './models/User.js';
 import { updateTaskStatus, createTaskWithHistory, applyStatusLifecycle, emitTaskCreated, emitTaskStatusChanged, emitTaskAssigned } from './lib/taskService.js';
 import { convertDueDate, migrateLegacyFields, assertMappedStatus } from './lib/taskMigration.js';
-import { addTeamMember, removeTeamMember, setDatabaseReady as setTeamDatabaseReady } from './lib/teamService.js';
+import {
+  addTeamMember, removeTeamMember, listTeamMembers, updateMemberRole,
+  setDatabaseReady as setTeamDatabaseReady
+} from './lib/teamService.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
@@ -263,11 +267,12 @@ function validateTaskInput(body, partial = false) {
   if (body.dueDate !== undefined && body.dueDate !== null && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
   if (body.estimateHours !== undefined && body.estimateHours !== null && (typeof body.estimateHours !== 'number' || !Number.isFinite(body.estimateHours) || body.estimateHours < 0 || body.estimateHours > 1000)) throw createAuthError(400, 'Estimate must be a number of hours from 0 to 1000.');
   if (body.sprintId !== undefined && (body.sprintId !== null && (typeof body.sprintId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.sprintId)))) throw createAuthError(400, 'Invalid sprint id.');
+    if (body.teamId !== undefined && (body.teamId !== null && (typeof body.teamId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.teamId)))) throw createAuthError(400, 'Invalid team id.');
   if (body.storyPoints !== undefined && (!Number.isInteger(body.storyPoints) || body.storyPoints < 0 || body.storyPoints > 100)) throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
 }
 function validTaskKey(key) { return typeof key === 'string' && /^KAN-[A-Z0-9]+$/i.test(key); }
 function taskUpdates(body) {
-  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'assigneeId', 'dueDate', 'estimateHours', 'sprintId', 'storyPoints'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'assigneeId', 'dueDate', 'estimateHours', 'sprintId', 'storyPoints', 'teamId'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
 }
 
 // Resolves an incoming assignee reference to the persisted pair
@@ -385,7 +390,11 @@ app.post('/api/sprints', requireAuth, async (req, res, next) => {
     const endDate = String(req.body?.endDate || endDateForStart(startDate));
     const dateValidation = validateSprintRange(startDate, endDate);
     if (!dateValidation.ok) return res.status(400).json({ error: dateValidation.error });
-    res.status(201).json(sprintView(await sprintStore.create({ ownerId: userId(req), name, goal, startDate, endDate }), []));
+    const teamId = req.body?.teamId ? String(req.body.teamId) : null;
+    if (teamId && !/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const sprintData = { ownerId: userId(req), name, goal, startDate, endDate };
+    if (teamId) sprintData.teamId = teamId;
+    res.status(201).json(sprintView(await sprintStore.create(sprintData), []));
   } catch (error) { next(error); }
 });
 app.get('/api/sprints/:id', requireAuth, async (req, res, next) => {
@@ -463,6 +472,8 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
     if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
+    const teamId = req.body?.teamId ? String(req.body.teamId) : null;
+    if (teamId && !/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
     const assigneeFields = await resolveAssigneeFields(req, req.body.assigneeId, req.body.assignee);
     if (!assigneeFields) return res.status(400).json({ error: 'Invalid assignee id.' });
     const due = convertDueDate(req.body.dueDate ?? '', todayIsoDate());
@@ -477,7 +488,7 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
       dueDate: due.date, estimateHours: Number.isFinite(req.body.estimateHours) ? req.body.estimateHours : 0,
       sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
       comments: [], attachments: [], dependencies: []
-    }, userId(req), req.body.sprintId || null);
+    }, userId(req), teamId);
     res.status(201).json(task);
   } catch (error) { next(error); }
 });
@@ -504,7 +515,7 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (updates.estimateHours !== undefined && updates.estimateHours !== null) updates.estimateHours = Number(updates.estimateHours);
     // Status changes (and only status changes) flow through the centralized
     // service inside store.update; everything else is a plain field update.
-    const updated = await store.update(task.key, updates, userId(req), task.sprintId ? String(task.sprintId) : null, req.role);
+    const updated = await store.update(task.key, updates, userId(req), updates.teamId ? String(updates.teamId) : (task.sprintId ? String(task.sprintId) : null), req.role);
     if (!updated) return res.status(404).json({ error: 'Task not found.' });
     res.json(updated);
   } catch (error) { next(error); }
@@ -551,59 +562,215 @@ app.get('/api/teams/:teamId/history', requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// Team membership ("team" == sprint). Membership writes live in
+// Team management. A "team" is an enduring workspace — distinct from a sprint
 // lib/teamService.js, which emits member.joined / member.left only after the
-// write commits. Authorization preserves the existing sprint model: team
-// management is visible to the owner (and admins); members may always remove
-// themselves (leave a team).
+// write commits. Authorization: team owners and admins manage membership;
+// members may always remove themselves (leave a team).
 const validMemberId = (value) => typeof value === 'string' && /^[a-zA-Z0-9_-]{8,64}$/.test(value);
 
-async function findTeamForMembership(teamId) {
-  if (mongoReady) return Sprint.findById(teamId).lean();
-  return memorySprints.find((sprint) => sprintId(sprint) === teamId) || null;
+function isTeamOwnerOrAdmin(team, req) {
+  return String(team.ownerId) === userId(req) || req.role === 'admin';
 }
 
-async function userExists(memberId) {
-  if (mongoReady) return Boolean(await User.findById(memberId));
-  return [...memoryUsers.values()].some((user) => String(user._id) === String(memberId));
+function canManageTeam(team, req) {
+  return isTeamOwnerOrAdmin(team, req);
 }
+
+// ---- List teams the current user belongs to (as owner or member) ---------
+app.get('/api/teams', requireAuth, async (req, res, next) => {
+  try {
+    let teams;
+    if (mongoReady) {
+      const owned = await Team.find({ ownerId: userId(req) }).lean();
+      const memberships = await TeamMember.find({ userId: userId(req) }).lean();
+      const memberTeamIds = new Set(memberships.map((m) => String(m.teamId)));
+      const fullTeams = await Promise.all(
+        [...memberTeamIds].map((id) => Team.findById(id).lean())
+      );
+      teams = [...owned, ...fullTeams.filter((t) => t && !owned.some((o) => String(o._id) === String(t._id)))];
+    } else {
+      const ownedSprints = memorySprints.filter((s) => String(s.ownerId) === userId(req));
+      const ownedTeams = ownedSprints.map((s) => ({ _id: sprintId(s), name: s.name, ownerId: s.ownerId }));
+      const memberships = memoryTeamMembers.filter((m) => String(m.userId) === userId(req));
+      const memberTeamIds = new Set(memberships.map((m) => String(m.teamId)));
+      const memberTeams = [];
+      for (const teamId of memberTeamIds) {
+        const sprint = memorySprints.find((s) => sprintId(s) === teamId);
+        if (sprint) memberTeams.push({ _id: teamId, name: sprint.name, ownerId: sprint.ownerId });
+      }
+      teams = [...ownedTeams, ...memberTeams];
+    }
+    res.json(teams);
+  } catch (error) { next(error); }
+});
+
+// ---- Create a team -------------------------------------------------------
+app.post('/api/teams', requireAuth, async (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Team name must be between 1 and 120 characters.' });
+    const actorId = userId(req);
+    let team;
+    if (mongoReady) {
+      team = await Team.create({ name, ownerId: actorId });
+    } else {
+      team = { _id: `mem-team-${Date.now()}-${crypto.randomInt(100, 999)}`, name, ownerId: actorId, createdAt: new Date() };
+      if (!globalThis.__memoryTeams) globalThis.__memoryTeams = [];
+      globalThis.__memoryTeams.push(team);
+    }
+    res.status(201).json({ _id: String(team._id), name: team.name, ownerId: String(team.ownerId), role: 'owner' });
+  } catch (error) { next(error); }
+});
 
 app.post('/api/teams/:teamId/members', requireAuth, async (req, res, next) => {
   try {
     const teamId = String(req.params.teamId || '');
     if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
-    const memberId = String(req.body?.memberId || '');
-    if (!validMemberId(memberId)) return res.status(400).json({ error: 'Invalid member id.' });
-    const sprint = await findTeamForMembership(teamId);
+    const userIdParam = String(req.body?.userId || '');
+    if (!validMemberId(userIdParam)) return res.status(400).json({ error: 'Invalid user id.' });
+    const team = await findTeamForMembership(teamId);
     // Teams stay invisible to non-members: unknown and unauthorized share 404.
-    if (!sprint) return res.status(404).json({ error: 'Team not found.' });
-    const isOwner = String(sprint.ownerId) === userId(req);
-    if (!isOwner && req.role !== 'admin') return res.status(404).json({ error: 'Team not found.' });
-    if (String(sprint.ownerId) === memberId) return res.status(409).json({ error: 'The team owner is already part of the team.' });
-    if (!await userExists(memberId)) return res.status(404).json({ error: 'Member not found.' });
-    const { created, membership } = await addTeamMember({ teamId, memberId, actorId: userId(req) });
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
+    if (!canManageTeam(team, req)) return res.status(404).json({ error: 'Team not found.' });
+    if (String(team.ownerId) === userIdParam) return res.status(409).json({ error: 'The team owner is already part of the team.' });
+    if (!await userExists(userIdParam)) return res.status(404).json({ error: 'User not found.' });
+    const { created, membership } = await addTeamMember({ teamId, userId: userIdParam, actorId: userId(req) });
     // Adding an existing member is a no-op (no duplicate join event).
-    if (!created) return res.status(409).json({ error: 'Member is already part of this team.' });
-    res.status(201).json({ teamId: String(membership.teamId), memberId: String(membership.memberId), joinedAt: membership.joinedAt });
+    if (!created) return res.status(409).json({ error: 'User is already part of this team.' });
+    res.status(201).json({ teamId: String(membership.teamId), userId: String(membership.userId), role: membership.role, joinedAt: membership.joinedAt });
   } catch (error) { next(error); }
 });
 
-app.delete('/api/teams/:teamId/members/:memberId', requireAuth, async (req, res, next) => {
+app.delete('/api/teams/:teamId/members/:userId', requireAuth, async (req, res, next) => {
   try {
     const teamId = String(req.params.teamId || '');
     if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
-    const memberId = String(req.params.memberId || '');
-    if (!validMemberId(memberId)) return res.status(400).json({ error: 'Invalid member id.' });
-    const sprint = await findTeamForMembership(teamId);
-    if (!sprint) return res.status(404).json({ error: 'Team not found.' });
+    const userIdParam = String(req.params.userId || '');
+    if (!validMemberId(userIdParam)) return res.status(400).json({ error: 'Invalid user id.' });
+    const team = await findTeamForMembership(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
     // Members may always leave; removing anyone else needs owner or admin.
-    const isSelf = memberId === userId(req);
-    const isOwner = String(sprint.ownerId) === userId(req);
-    if (!isSelf && !isOwner && req.role !== 'admin') return res.status(404).json({ error: 'Team not found.' });
-    const { removed } = await removeTeamMember({ teamId, memberId, actorId: userId(req) });
+    const isSelf = userIdParam === userId(req);
+    if (!isSelf && !canManageTeam(team, req)) return res.status(404).json({ error: 'Team not found.' });
+    if (String(team.ownerId) === userIdParam) return res.status(403).json({ error: 'The team owner cannot be removed from the team.' });
+    const { removed } = await removeTeamMember({ teamId, userId: userIdParam, actorId: userId(req) });
     // Removing a membership that does not exist is a no-op (no false leave event).
     if (!removed) return res.status(404).json({ error: 'Membership not found.' });
     res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+// ---- Get team details + members ------------------------------------------
+app.get('/api/teams/:teamId', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const team = await findTeamForMembership(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
+    const isOwner = String(team.ownerId) === userId(req);
+    if (!isOwner && req.role !== 'admin') {
+      const memberships = await listTeamMembers(teamId);
+      if (!memberships.some((m) => String(m.userId) === userId(req))) return res.status(404).json({ error: 'Team not found.' });
+    }
+    const memberships = await listTeamMembers(teamId);
+    res.json({
+      _id: String(team._id),
+      name: team.name,
+      ownerId: String(team.ownerId),
+      isOwner,
+      members: memberships.map((m) => ({ userId: String(m.userId), role: m.role, addedBy: String(m.addedBy), joinedAt: m.joinedAt }))
+    });
+  } catch (error) { next(error); }
+});
+
+// ---- Update team name (owner/admin only) ---------------------------------
+app.patch('/api/teams/:teamId', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const team = await findTeamForMembership(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
+    if (!canManageTeam(team, req)) return res.status(403).json({ error: 'You do not have permission to update this team.' });
+    const name = String(req.body?.name || '').trim();
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Team name must be between 1 and 120 characters.' });
+    if (mongoReady) {
+      const updated = await Team.findByIdAndUpdate(teamId, { $set: { name } }, { new: true }).lean();
+      res.json({ _id: String(updated._id), name: updated.name, ownerId: String(updated.ownerId) });
+    } else {
+      if (globalThis.__memoryTeams) {
+        const t = globalThis.__memoryTeams.find((t) => String(t._id) === teamId);
+        if (t) t.name = name;
+      }
+      res.json({ _id: teamId, name, ownerId: String(team.ownerId) });
+    }
+  } catch (error) { next(error); }
+});
+
+// ---- Delete a team (owner only) ------------------------------------------
+app.delete('/api/teams/:teamId', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const team = await findTeamForMembership(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
+    if (String(team.ownerId) !== userId(req) && req.role !== 'admin') {
+      return res.status(403).json({ error: 'Only the team owner or an admin may delete a team.' });
+    }
+    if (mongoReady) {
+      await TeamMember.deleteMany({ teamId });
+      await Team.deleteOne({ _id: teamId });
+      await Task.updateMany({ teamId }, { $set: { teamId: null } });
+      await Sprint.updateMany({ teamId }, { $set: { teamId: null } });
+    } else {
+      if (globalThis.__memoryTeams) {
+        globalThis.__memoryTeams = globalThis.__memoryTeams.filter((t) => String(t._id) !== teamId);
+      }
+      memoryTeamMembers = memoryTeamMembers.filter((m) => String(m.teamId) !== teamId);
+      memoryTasks = memoryTasks.map((t) => String(t.teamId) === teamId ? { ...t, teamId: null } : t);
+      memorySprints = memorySprints.map((s) => String(s.teamId) === teamId ? { ...s, teamId: null } : s);
+    }
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+// ---- List team members ---------------------------------------------------
+app.get('/api/teams/:teamId/members', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const team = await findTeamForMembership(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
+    const isOwner = String(team.ownerId) === userId(req);
+    if (!isOwner && req.role !== 'admin') {
+      const memberships = await listTeamMembers(teamId);
+      if (!memberships.some((m) => String(m.userId) === userId(req))) return res.status(404).json({ error: 'Team not found.' });
+    }
+    const memberships = await listTeamMembers(teamId);
+    res.json(memberships.map((m) => ({
+      userId: String(m.userId),
+      role: m.role,
+      addedBy: String(m.addedBy),
+      joinedAt: m.joinedAt
+    })));
+  } catch (error) { next(error); }
+});
+
+// ---- Update a member's role (owner/admin only) ---------------------------
+app.patch('/api/teams/:teamId/members/:userId/role', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const userIdParam = String(req.params.userId || '');
+    if (!validMemberId(userIdParam)) return res.status(400).json({ error: 'Invalid user id.' });
+    const team = await findTeamForMembership(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found.' });
+    if (!canManageTeam(team, req)) return res.status(404).json({ error: 'Team not found.' });
+    if (String(team.ownerId) === userIdParam) return res.status(403).json({ error: 'The team owner role cannot be changed.' });
+    const role = String(req.body?.role || '');
+    if (!['admin', 'member'].includes(role)) return res.status(400).json({ error: 'Role must be "admin" or "member".' });
+    const { updated } = await updateMemberRole({ teamId, userId: userIdParam, actorId: userId(req), role });
+    if (!updated) return res.status(404).json({ error: 'Membership not found.' });
+    res.json({ ok: true, userId: userIdParam, role });
   } catch (error) { next(error); }
 });
 
@@ -778,6 +945,6 @@ if (process.env.NODE_ENV === 'production') {
 // store lets tests exercise assignment/status paths directly, and awaiting
 // `serverStarted` gives tests a handle to close instead of killing a child
 // process.
-export { app, connectMongo, memoryTasks, memoryHistory, sessions, store };
+export { app, connectMongo, memoryTasks, memoryHistory, sessions, store, findTeamForMembership };
 const serverStarted = connectMongo().then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)));
 export { serverStarted };
