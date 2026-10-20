@@ -2,9 +2,63 @@ import { Task } from '../models/Task.js';
 import { Sprint } from '../models/Sprint.js';
 import { TaskHistory } from '../models/TaskHistory.js';
 import { ALLOWED_STATUSES, STATUS_CATEGORY, assertMappedStatus } from './taskMigration.js';
+import { EVENTS, emitEvent } from './events.js';
 
 // Canonical status list exposed to routes and tests (single source of truth).
 export const ALLOWED_STATUSES_LIST = Object.freeze([...ALLOWED_STATUSES]);
+
+// ---------------------------------------------------------------------------
+// Event emission helpers (see lib/events.js).
+//
+// Every helper builds its payload from the *persisted* task and emits only
+// after the database operation succeeded, so failed writes never produce
+// success events. All task events require an authenticated actor; mirroring
+// the TaskHistory convention, operations without an actor (there is no
+// system-actor convention in this codebase) record no history and emit no
+// event rather than fabricating an id.
+// ---------------------------------------------------------------------------
+
+const idOrNull = (value) => (value === null || value === undefined ? null : String(value));
+
+export function emitTaskCreated({ task, actorId, teamId, at }) {
+  if (actorId === null || actorId === undefined) return;
+  emitEvent(EVENTS.TASK_CREATED, {
+    taskId: String(task._id),
+    teamId: idOrNull(teamId ?? task.sprintId ?? null),
+    actorId: String(actorId),
+    at
+  });
+}
+
+export function emitTaskStatusChanged({ task, from, to, actorId, teamId, at }) {
+  if (actorId === null || actorId === undefined) return;
+  emitEvent(EVENTS.TASK_STATUS_CHANGED, {
+    taskId: String(task._id),
+    teamId: idOrNull(teamId ?? task.sprintId ?? null),
+    actorId: String(actorId),
+    from,
+    to,
+    at
+  });
+}
+
+// Emitted when a persisted assignee reference changes to a different (or
+// newly set) user. Unassignment (assigneeId becoming null) and unchanged
+// assignments intentionally emit nothing: the contract only covers
+// assignments/reassignments to a real user.
+export function emitTaskAssigned({ task, previousAssigneeId, actorId, at }) {
+  if (!task || actorId === null || actorId === undefined) return;
+  const assigneeId = idOrNull(task.assigneeId);
+  if (!assigneeId) return;
+  if (String(previousAssigneeId ?? '') === assigneeId) return;
+  emitEvent(EVENTS.TASK_ASSIGNED, {
+    taskId: String(task._id),
+    teamId: idOrNull(task.sprintId ?? null),
+    actorId: String(actorId),
+    assigneeId,
+    at
+  });
+}
 
 const IN_PROGRESS_STATUSES = new Set(['progress', 'review']);
 const DONE_STATUSES = new Set(['done']);
@@ -81,6 +135,17 @@ export async function updateTaskStatus({ taskId, teamId, newStatus, actorId, use
     });
   }
 
+  // The status-change event is emitted last: only after the task update and
+  // history write have both been persisted, and only for real transitions.
+  emitTaskStatusChanged({
+    task,
+    from,
+    to: newStatus,
+    actorId: actor,
+    teamId: sprint ? sprint._id : (task.sprintId || null),
+    at: now
+  });
+
   return task;
 }
 
@@ -102,6 +167,11 @@ export async function createTaskWithHistory({ data, actorId, teamId }) {
         at: now
       })
     : null;
+
+  // Emitted only after the task (and its initial history entry, when an
+  // actor is present) have been persisted. If the history write above
+  // throws, the whole operation fails and no success event is emitted.
+  emitTaskCreated({ task, actorId, teamId: teamId ?? task.sprintId ?? null, at: now });
 
   return { task, initialHistory };
 }

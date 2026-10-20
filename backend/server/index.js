@@ -11,8 +11,9 @@ import { TaskHistory } from './models/TaskHistory.js';
 import { Sprint } from './models/Sprint.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User } from './models/User.js';
-import { updateTaskStatus, createTaskWithHistory, applyStatusLifecycle } from './lib/taskService.js';
-import { convertDueDate, migrateLegacyFields } from './lib/taskMigration.js';
+import { updateTaskStatus, createTaskWithHistory, applyStatusLifecycle, emitTaskCreated, emitTaskStatusChanged, emitTaskAssigned } from './lib/taskService.js';
+import { convertDueDate, migrateLegacyFields, assertMappedStatus } from './lib/taskMigration.js';
+import { addTeamMember, removeTeamMember, setDatabaseReady as setTeamDatabaseReady } from './lib/teamService.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
@@ -112,6 +113,7 @@ async function connectMongo() {
     await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 1500 });
     mongoReady = true;
     setDatabaseReady(true);
+    setTeamDatabaseReady(true);
     console.log('MongoDB connected');
   } catch (error) {
     console.warn(`MongoDB unavailable, using in-memory storage: ${error.message}`);
@@ -123,6 +125,7 @@ const store = {
   find: (key) => mongoReady ? Task.findOne({ key }) : Promise.resolve(memoryTasks.find((task) => task.key === key)),
   create: async (data, actorId = null, teamId = null) => {
     if (mongoReady) {
+      // createTaskWithHistory emits task.created itself, after persistence.
       const { task } = await createTaskWithHistory({ data, actorId, teamId: teamId ?? data.sprintId ?? null });
       return task;
     }
@@ -133,16 +136,20 @@ const store = {
     if (actorId) {
       memoryHistory.push({ _id: crypto.randomUUID(), taskId: task._id, teamId: teamId ?? task.sprintId ?? null, from: null, to: task.status, actorId, at: now });
     }
+    // Emitted only after the task is committed to the in-memory store.
+    emitTaskCreated({ task, actorId, teamId: teamId ?? task.sprintId ?? null, at: task.createdAt });
     return task;
   },
   update: async (key, data, actorId = null, teamId = null, requesterRole = 'member') => {
     if (mongoReady) {
       const existing = await Task.findOne({ key });
       if (!existing) return null;
+      const previousAssigneeId = existing.assigneeId ?? null;
       const { status: newStatus, ...rest } = data;
       if (Object.keys(rest).length) await Task.updateOne({ key }, { $set: rest }, { runValidators: true });
       if (newStatus !== undefined) {
-        // All status mutations are funneled through the centralized service.
+        // All status mutations are funneled through the centralized service,
+        // which emits task.status_changed after the transition commits.
         await updateTaskStatus({
           taskId: existing._id,
           teamId: teamId ?? rest.sprintId ?? existing.sprintId ?? null,
@@ -152,20 +159,32 @@ const store = {
           requesterRole
         });
       }
-      return Task.findOne({ key });
+      const updated = await Task.findOne({ key });
+      // Assignment event is derived from the persisted result and only fires
+      // when the assignee reference actually changed (see emitTaskAssigned).
+      emitTaskAssigned({ task: updated, previousAssigneeId, actorId, at: updated.updatedAt });
+      return updated;
     }
     const current = memoryTasks.find((task) => task.key === key);
     if (!current) return null;
     const now = new Date();
+    const previousAssigneeId = current.assigneeId ?? null;
     const { status: newStatus, ...rest } = data;
     const next = { ...current, ...rest, updatedAt: now };
-    if (newStatus !== undefined && newStatus !== current.status) {
+    const statusChanged = newStatus !== undefined && newStatus !== current.status;
+    if (statusChanged) {
+      assertMappedStatus(newStatus);
       applyStatusLifecycle(next, newStatus, now);
       if (actorId) {
         memoryHistory.push({ _id: crypto.randomUUID(), taskId: next._id, teamId: teamId ?? next.sprintId ?? null, from: current.status, to: newStatus, actorId, at: now });
       }
     }
     memoryTasks = memoryTasks.map((task) => task.key === key ? next : task);
+    // Events are emitted only after the write above committed.
+    if (statusChanged) {
+      emitTaskStatusChanged({ task: next, from: current.status, to: newStatus, actorId, teamId: teamId ?? next.sprintId ?? null, at: now });
+    }
+    emitTaskAssigned({ task: next, previousAssigneeId, actorId, at: now });
     return next;
   },
   remove: async (key) => {
@@ -532,6 +551,62 @@ app.get('/api/teams/:teamId/history', requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Team membership ("team" == sprint). Membership writes live in
+// lib/teamService.js, which emits member.joined / member.left only after the
+// write commits. Authorization preserves the existing sprint model: team
+// management is visible to the owner (and admins); members may always remove
+// themselves (leave a team).
+const validMemberId = (value) => typeof value === 'string' && /^[a-zA-Z0-9_-]{8,64}$/.test(value);
+
+async function findTeamForMembership(teamId) {
+  if (mongoReady) return Sprint.findById(teamId).lean();
+  return memorySprints.find((sprint) => sprintId(sprint) === teamId) || null;
+}
+
+async function userExists(memberId) {
+  if (mongoReady) return Boolean(await User.findById(memberId));
+  return [...memoryUsers.values()].some((user) => String(user._id) === String(memberId));
+}
+
+app.post('/api/teams/:teamId/members', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const memberId = String(req.body?.memberId || '');
+    if (!validMemberId(memberId)) return res.status(400).json({ error: 'Invalid member id.' });
+    const sprint = await findTeamForMembership(teamId);
+    // Teams stay invisible to non-members: unknown and unauthorized share 404.
+    if (!sprint) return res.status(404).json({ error: 'Team not found.' });
+    const isOwner = String(sprint.ownerId) === userId(req);
+    if (!isOwner && req.role !== 'admin') return res.status(404).json({ error: 'Team not found.' });
+    if (String(sprint.ownerId) === memberId) return res.status(409).json({ error: 'The team owner is already part of the team.' });
+    if (!await userExists(memberId)) return res.status(404).json({ error: 'Member not found.' });
+    const { created, membership } = await addTeamMember({ teamId, memberId, actorId: userId(req) });
+    // Adding an existing member is a no-op (no duplicate join event).
+    if (!created) return res.status(409).json({ error: 'Member is already part of this team.' });
+    res.status(201).json({ teamId: String(membership.teamId), memberId: String(membership.memberId), joinedAt: membership.joinedAt });
+  } catch (error) { next(error); }
+});
+
+app.delete('/api/teams/:teamId/members/:memberId', requireAuth, async (req, res, next) => {
+  try {
+    const teamId = String(req.params.teamId || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
+    const memberId = String(req.params.memberId || '');
+    if (!validMemberId(memberId)) return res.status(400).json({ error: 'Invalid member id.' });
+    const sprint = await findTeamForMembership(teamId);
+    if (!sprint) return res.status(404).json({ error: 'Team not found.' });
+    // Members may always leave; removing anyone else needs owner or admin.
+    const isSelf = memberId === userId(req);
+    const isOwner = String(sprint.ownerId) === userId(req);
+    if (!isSelf && !isOwner && req.role !== 'admin') return res.status(404).json({ error: 'Team not found.' });
+    const { removed } = await removeTeamMember({ teamId, memberId, actorId: userId(req) });
+    // Removing a membership that does not exist is a no-op (no false leave event).
+    if (!removed) return res.status(404).json({ error: 'Membership not found.' });
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
 // History is an audit trail: only admins may clear it.
 app.delete('/api/tasks/:key/history', requireAuth, async (req, res, next) => {
   try {
@@ -699,5 +774,10 @@ if (process.env.NODE_ENV === 'production') {
   app.get('*', (_req, res) => res.sendFile(path.join(__dirname, '../../frontend/dist/index.html')));
 }
 
-export { app, connectMongo, memoryTasks, memoryHistory, sessions };
-connectMongo().then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)));
+// `store` and `serverStarted` are exported for tests: the service-level
+// store lets tests exercise assignment/status paths directly, and awaiting
+// `serverStarted` gives tests a handle to close instead of killing a child
+// process.
+export { app, connectMongo, memoryTasks, memoryHistory, sessions, store };
+const serverStarted = connectMongo().then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)));
+export { serverStarted };
