@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
-  Sparkles, Target,UserRound, Users, X, Zap
+  Sparkles, Target,UserRound, Users, X, Zap, LoaderCircle
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
@@ -51,8 +51,9 @@ function App() {
   const [viewMode, setViewMode] = useState('board');
   const [copilotInput, setCopilotInput] = useState('');
   const [copilotMessages, setCopilotMessages] = useState([
-    { role: 'assistant', text: 'Your board is synced. Ask me to create, triage, or summarize your work.', timestamp: Date.now() }
+    { id: 'welcome', sender: 'assistant', role: 'assistant', text: 'Your board is synced. Ask me to create, triage, or summarize your work.', timestamp: Date.now() }
   ]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -261,11 +262,17 @@ function App() {
   async function sendCopilot(event) {
     event.preventDefault();
     const message = copilotInput.trim();
-    if (!message) return;
+    if (!message || isAnalyzing) return;
 
-    // Add user message immediately for UI responsiveness
-    setCopilotMessages((current) => [...current, { role: 'user', text: message, timestamp: Date.now() }]);
+    setCopilotMessages((current) => [...current, {
+      id: `user-${Date.now()}`,
+      sender: 'user',
+      role: 'user',
+      text: message,
+      timestamp: Date.now(),
+    }]);
     setCopilotInput('');
+    setIsAnalyzing(true);
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/copilot/chat`, {
@@ -282,6 +289,8 @@ function App() {
         if (refreshed.ok) setTasks(await refreshed.json());
       }
       setCopilotMessages((current) => [...current, {
+        id: `assistant-${Date.now()}`,
+        sender: 'assistant',
         role: 'assistant',
         text: data.reply,
         timestamp: Date.now(),
@@ -290,10 +299,14 @@ function App() {
       console.error('Copilot API error:', error);
       // Add error message
       setCopilotMessages((current) => [...current, {
+        id: `assistant-error-${Date.now()}`,
+        sender: 'assistant',
         role: 'assistant',
         text: `Sorry, I encountered an error: ${error.message}. Please try again later.`,
         timestamp: Date.now(),
       }]);
+    } finally {
+      setIsAnalyzing(false);
     }
   }
 
@@ -325,7 +338,7 @@ function App() {
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
         <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{user?.name ? `${user.name}'s board` : 'My board'}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(true)}><Bolt size={15} /> AI Auto-Triage</button><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>
-        <div className={`board-layout ${copilotOpen ? '' : 'copilot-closed'}`}><section className={viewMode === 'list' ? 'task-list-view' : 'board-canvas'}>{loading ? <div className="loading-state">Loading your sprint board...</div> : viewMode === 'list' ? <TaskList tasks={filteredTasks} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} /> : columns.map((column) => <BoardColumn key={column.id} column={column} tasks={filteredTasks.filter((task) => task.status === column.id)} onDrop={handleDrop} onAdd={() => openCreate(column.id)} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} />)}</section>{copilotOpen && <Copilot messages={copilotMessages} input={copilotInput} setInput={setCopilotInput} onSubmit={sendCopilot} onClose={() => setCopilotOpen(false)} />}</div>
+        <div className="board-layout"><section className={viewMode === 'list' ? 'task-list-view' : 'board-canvas'}>{loading ? <div className="loading-state">Loading your sprint board...</div> : viewMode === 'list' ? <TaskList tasks={filteredTasks} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} /> : columns.map((column) => <BoardColumn key={column.id} column={column} tasks={filteredTasks.filter((task) => task.status === column.id)} onDrop={handleDrop} onAdd={() => openCreate(column.id)} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} />)}</section></div>{copilotOpen && (<><div className="copilot-backdrop is-open" onClick={() => setCopilotOpen(false)}></div><aside className="copilot is-open"><Copilot messages={copilotMessages} input={copilotInput} setInput={setCopilotInput} onSubmit={sendCopilot} onClose={() => setCopilotOpen(false)} isAnalyzing={isAnalyzing} /></aside></>)}
         <section className="velocity-panel"><div><div className="eyebrow">Your progress</div><h2>Here is how your board is tracking right now</h2></div><div className="velocity-stats"><div><strong>{tasks.length}</strong><span>Total tasks</span></div><div><strong>{inFlight}</strong><span>In progress</span></div><div><strong>{completed}</strong><span>Completed</span></div></div></section>
         {showModal && <TaskModal status={modalStatus} task={editingTask} onClose={() => { setShowModal(false); setEditingTask(null); }} onSubmit={editingTask ? saveTask : createTask} assignees={boards.find((board) => board.id === activeBoardId)?.members?.map((member) => member.name) || (user?.name ? [user.name] : [])} />}
         </>}
@@ -342,7 +355,7 @@ function AuthScreen({ mode, setMode, error, busy, onSubmit }) {
 }
 function Metric({ label, value, dot, icon }) { return <div className="metric"><span>{dot && <i className={`metric-dot ${dot}`}></i>}{icon}{label}</span><strong>{value}</strong></div>; }
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove, onEdit, onDelete }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
-function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><span className="assignee"><i>{initialsOf(task.assignee)}</i>{task.assignee}</span><span className="task-meta"><CalendarDays size={13} />{task.dueDate || 'No due date'}</span><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></article>; }
+function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><div className="task-footer-details"><span className="assignee"><i>{initialsOf(task.assignee)}</i><b>{task.assignee}</b></span><span className="task-meta"><CalendarDays size={13} />{task.dueDate || 'No due date'}</span></div><div className="task-footer-actions"><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></div></article>; }
 function TaskList({ tasks, onMove, onEdit, onDelete }) { return <div className="task-table"><div className="task-table-head"><span>Task</span><span>Status</span><span>Priority</span><span>Assignee</span><span>Due</span><span>Actions</span></div>{tasks.length ? tasks.map((task) => <div className="task-table-row" key={task.key}><div><strong>#{task.key}</strong><span>{task.title}</span></div><select aria-label={`Status for ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span><span>{task.assignee}</span><span>{task.dueDate}</span><span className="row-actions"><button type="button" onClick={() => onEdit(task)}>Edit</button><button type="button" onClick={() => onDelete(task)}>Delete</button></span></div>) : <div className="empty-column">No tasks match the current filters.</div>}</div>; }
 function BoardEmptyState({ onCreate, onManage }) {
   return <section className="board-empty-state"><div className="board-empty-icon"><LayoutGrid size={25} /></div><div className="eyebrow">Your workspace is ready</div><h1>Create your first kanban board</h1><p>Boards keep projects, tasks, and collaborators organized. Create one now to start planning your work.</p><div className="board-empty-actions"><button className="primary-button" onClick={onCreate}><Plus size={16} /> Create a board</button><button className="secondary-button" onClick={onManage}>Open board management</button></div></section>;
@@ -351,7 +364,14 @@ function BoardDialog({ mode, name, setName, busy, onClose, onSubmit }) {
   const isRename = mode === 'rename';
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="task-modal board-dialog" onSubmit={onSubmit}><div className="modal-heading"><div><div className="eyebrow">{isRename ? 'Board settings' : 'New board'}</div><h2>{isRename ? 'Rename board' : 'Create a board'}</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={17} /></button></div><p className="board-dialog-copy">{isRename ? 'Choose a name that helps your team recognize this workspace.' : 'Give your new workspace a clear name. You can invite collaborators after it is created.'}</p><label>Board name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} placeholder="e.g. Website launch" autoFocus required /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Saving...' : isRename ? 'Save name' : 'Create board'}</button></div></form></div>;
 }
-function Copilot({ messages, input, setInput, onSubmit, onClose }) {
+function Copilot({ messages, input, setInput, onSubmit, onClose, isAnalyzing }) {
+  const streamRef = useRef(null);
+
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (stream) stream.scrollTo({ top: stream.scrollHeight, behavior: 'smooth' });
+  }, [messages, isAnalyzing]);
+
   const formatTime = (timestamp) => {
     if (!timestamp) return 'Just now';
     const diff = Date.now() - timestamp;
@@ -360,7 +380,31 @@ function Copilot({ messages, input, setInput, onSubmit, onClose }) {
     return `${Math.floor(diff / 3600000)}h ago`;
   };
 
-  return <aside className="copilot"><div className="copilot-header"><div className="copilot-title"><span className="copilot-icon"><Bot size={17} /><i></i></span><div><strong>LeadAI Copilot <b>LIVE</b></strong><small>Your workspace</small></div></div><div className="copilot-actions"><IconButton label="Close Copilot" onClick={onClose}><X size={16} /></IconButton></div></div><div className="copilot-context"><span><Activity size={13} /> {messages.length} messages</span><button><Activity size={12} /> Re-analyze</button></div><div className="chat-stream">{messages.map((message, index) => <div key={`${message.text}-${index}`} className={`chat-message ${message.role}`}><span className="message-icon">{message.role === 'assistant' ? <Sparkles size={13} /> : 'You'}</span><div><p>{message.text}</p><small>{message.role === 'assistant' ? 'LeadAI Copilot' : formatTime(message.timestamp)}</small></div></div>)}<div className="suggestion"><Check size={14} /><span>Board context is current</span></div></div><form className="copilot-input" onSubmit={onSubmit}><input placeholder="Ask me to create, move, or update a task..." value={input} onChange={(event) => setInput(event.target.value)} /><button aria-label="Send Copilot message"><ArrowRight size={17} /></button><small>Can edit tasks on this board</small></form></aside>;
+  function handleKeyDown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  }
+
+  return <div className="copilot-content">
+    <div className="copilot-header">
+      <div className="copilot-title"><span className="copilot-icon"><Bot size={17} /></span><div><strong>LeadAI Copilot</strong><small><i></i> Connected</small></div></div>
+      <div className="copilot-actions"><span className="copilot-live-badge">Live</span><IconButton label="Close Copilot" onClick={onClose}><X size={16} /></IconButton></div>
+    </div>
+    <div className="chat-stream" ref={streamRef} aria-live="polite">
+      {messages.map((message) => <div key={message.id} className={`chat-message ${message.sender || message.role}`}>
+        {message.sender === 'assistant' || message.role === 'assistant' ? <span className="message-icon"><Sparkles size={13} /></span> : null}
+        <div className="chat-bubble"><p>{message.text}</p><small>{message.sender === 'assistant' || message.role === 'assistant' ? 'LeadAI Copilot' : formatTime(message.timestamp)}</small></div>
+      </div>)}
+      {isAnalyzing && <div className="chat-message assistant thinking-message"><span className="message-icon"><Sparkles size={13} /></span><div className="chat-bubble"><span>LeadAI Copilot is thinking</span><span className="thinking-dots"><i></i><i></i><i></i></span></div></div>}
+    </div>
+    <form className="copilot-input" onSubmit={onSubmit}>
+      <div className="copilot-status"><Check size={12} /> Board context is current</div>
+      <div className="copilot-composer"><textarea rows="1" aria-label="Message LeadAI Copilot" placeholder="Ask me to create, move, or update a task..." value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={handleKeyDown} disabled={isAnalyzing} /><button type="submit" aria-label="Send Copilot message" disabled={isAnalyzing || !input.trim()}>{isAnalyzing ? <LoaderCircle className="spin" size={17} /> : <ArrowRight size={17} />}</button></div>
+      <small>Enter to send · Shift+Enter for a new line</small>
+    </form>
+  </div>;
 }
 function BoardManager({ token, boards, setBoards, activeBoardId }) {
   const [name, setName] = useState('');
