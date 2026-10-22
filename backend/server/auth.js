@@ -61,6 +61,12 @@ export async function findUserByEmail(email) {
   return User.findOne({ email: normalizedEmail }).select('+passwordHash');
 }
 
+export async function findUserById(id) {
+  if (!id) return null;
+  if (!databaseReady) return [...memoryUsers.values()].find((user) => String(user._id) === String(id)) || null;
+  return User.findById(id);
+}
+
 export async function createUser({ email, password, name, role = 'member' }) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
@@ -97,6 +103,14 @@ export async function authenticateUser({ email, password }) {
     throw createAuthError(401, 'Invalid credentials.');
   }
   return user;
+}
+
+// Profile edits must show up in the current tab (and any other signed-in tab) without a re-login.
+export function refreshSessionUser(user) {
+  const serialized = serializeUser(user);
+  for (const session of sessions.values()) {
+    if (String(session.user._id) === String(serialized._id)) session.user = serialized;
+  }
 }
 
 export function createAuthSession(user) {

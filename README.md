@@ -29,7 +29,7 @@ npm run install:all   # first time only (installs root + backend + frontend)
 npm run dev           # runs backend (:4000) + frontend (:5173) together
 ```
 
-Open `http://localhost:5173`. The API runs on port 4000. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` to persist tasks and users in MongoDB; if it is omitted the API falls back to seeded in-memory data. The default points at a dedicated local `leadai` database (`mongodb://127.0.0.1:27017/leadai`). To use MongoDB Atlas instead, comment out the local `MONGODB_URI` line in `backend/.env` and uncomment the `mongodb+srv://` line, filling in your credentials. See `instructions/` for API, environment, and navigation details.
+Open `http://localhost:5173`. The API runs on port 4000. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` to the team's shared development database (see below). The API refuses to start with a missing or unreachable database; `ALLOW_MEMORY_DB=true` is the only (offline-only) way to run on throwaway in-memory data. See `instructions/` for API, environment, and navigation details.
 
 To run the applications separately, use two terminals:
 
@@ -44,3 +44,44 @@ npm run dev
 ```
 
 The app requires an account. Authentication uses short-lived bearer sessions; sign-up always creates a member account. Task attachments are stored under `backend/uploads/` and are excluded from public static serving. Password reset requests intentionally return the same response for known and unknown email addresses; configure an email delivery adapter before using reset links in production.
+
+## Shared development database
+
+All five developers connect to one development MongoDB database. Git carries code, schema/index definitions and seed scripts; it never carries database files, dumps or credentials.
+
+```text
+Developer 1 ──┐
+Developer 2 ──┤
+Developer 3 ──┼──> Shared development MongoDB (Atlas, database `leadai_dev`)
+Developer 4 ──┤
+Developer 5 ──┘
+```
+
+One-time Atlas setup (requires Atlas account access, do this together):
+
+1. Create a project and a free cluster, then a database named `leadai_dev`. Keep a separate `leadai_prod` database/cluster for production and never point development at it.
+2. Create one database user per developer (Database Access → Add New Database User). Grant `readWrite` on `leadai_dev` only, not `Atlas admin`.
+3. In Network Access, allow only the team's egress IPs. Only use `0.0.0.0/0` for a short-lived demo, and remove it afterwards.
+4. Give each developer their own `mongodb+srv://.../leadai_dev?...` URI through a password manager. Do not post URIs in chat, issues or commits.
+5. Each developer copies `backend/.env.example` to `backend/.env`, replaces `<your-name>`, `<password>` and `<cluster>`, then runs the commands below.
+
+Commands after cloning and after every pull that changes schemas:
+
+```bash
+npm run install:all                 # first time only
+npm --prefix backend run db:check   # confirms which database and indexes you are using
+npm --prefix backend run db:setup   # creates missing indexes; never edits data
+npm --prefix backend run db:seed -- --email=you@example.com   # optional, idempotent
+npm run dev
+```
+
+What is shared and how:
+
+- **Schema and indexes** live in `backend/server/models/` and are applied with `db:setup` (`createIndexes`, no drops).
+- **Sample data** is added by `db:seed`, which upserts by stable key and never overwrites edits or duplicates rows.
+- **Live development data** lives only in the shared database, so a `git pull` never changes it.
+- **Migrations**: this app has no versioned migration runner; when a schema change needs a data backfill, add a script under `backend/scripts/` and document it in the pull request. Keep it idempotent.
+- **Never** commit `.env` files, `mongodump` output, uploads or user records. `.gitignore` blocks them.
+- **Tests** use `ALLOW_MEMORY_DB=1` (in-memory) and `npm --prefix backend run test:db`, which uses a disposable `leadai_test_*` database on the local MongoDB server.
+
+If MongoDB is unreachable the API exits with a clear error instead of silently switching to in-memory storage. That fallback was the reason teammates saw different data and lost it on restart.

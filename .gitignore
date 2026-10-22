@@ -4,4 +4,18 @@ stitch_ai_kanban_task_manager
 .freebuff
 .vscode
 backend/uploads
+.env
+.env.*
+!.env.example
 backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+.github
+# Database dumps and exports belong in the shared database, not in Git.
+*.bson
+dump/
+backend/dump/
+frontend/dist/assets
