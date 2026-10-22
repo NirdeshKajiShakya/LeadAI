@@ -10,6 +10,7 @@ import { Task } from './models/Task.js';
 import { TaskHistory } from './models/TaskHistory.js';
 import { Sprint } from './models/Sprint.js';
 import { Team } from './models/Team.js';
+import { Notification } from './models/Notification.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
 import { connectDatabase, databaseStatus } from './db.js';
@@ -1350,3 +1351,83 @@ const serverStarted = connectMongo()
     process.exitCode = 1;
   });
 export { serverStarted };
+//
+// Notification API Routes
+//
+
+app.get('/api/notifications/unread', requireAuth, async (req, res, next) => {
+  try {
+    const userId = userId(req);
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const [notifications, total] = await Promise.all([
+      Notification.find({ userId, read: false })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      Notification.countDocuments({ userId, read: false })
+    ]);
+
+    res.json({
+      notifications,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit))
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/notifications', requireAuth, async (req, res, next) => {
+  try {
+    const userId = userId(req);
+    const { page = 1, limit = 20, read } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
+
+    const filter = {};
+    if (read !== undefined) filter.read = read === 'true';
+    if (read === undefined) filter.read = false;
+
+    const [notifications, total] = await Promise.all([
+      Notification.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+      Notification.countDocuments(filter)
+    ]);
+
+    res.json({
+      notifications,
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit))
+    });
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/notifications/:id/read', requireAuth, async (req, res, next) => {
+  try {
+    const userId = userId(req);
+    const { id } = req.params;
+
+    const notification = await Notification.findOneAndUpdate(
+      { _id: id, userId },
+      { read: true, readAt: new Date() },
+      { new: true, runValidators: true }
+    );
+
+    if (!notification) return res.status(404).json({ error: 'Notification not found.' });
+
+    res.json({ notification });
+  } catch (error) { next(error); }
+});
+
+app.patch('/api/notifications/read-all', requireAuth, async (req, res, next) => {
+  try {
+    const userId = userId(req);
+    await Notification.updateMany({ userId, read: false }, { read: true, readAt: new Date() });
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});

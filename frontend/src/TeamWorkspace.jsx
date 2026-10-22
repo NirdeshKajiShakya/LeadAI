@@ -191,6 +191,7 @@ export default function TeamWorkspace({ token, user }) {
               </div>
             )}
           </div>
+        </aside>
         <main className="tw-main">
           {!selectedTeam ? (
             <div className="tw-empty-state">
@@ -275,4 +276,3 @@ export default function TeamWorkspace({ token, user }) {
     </div>
   );
 }
-        </aside>
