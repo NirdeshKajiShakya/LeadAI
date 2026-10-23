@@ -119,6 +119,9 @@
  .sb-action { white-space: nowrap; }
  .sb-empty-row { padding: 16px 8px; color: #667384; border: 1px dashed #2a3542; border-radius: 4px; text-align: center; font-size: 10px; }
  .sb-backlog { background: #131a23; }
+ .sb-backlog-note { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; padding: 9px 11px; background: #1b222c; border: 1px solid #2c3846; border-radius: 5px; color: #c3cfdd; font-size: 11px; }
+ .sb-backlog-note svg { color: #d8a657; flex: 0 0 auto; }
+ .sb-backlog-note span { flex: 1; }
  .sb-alert { gap: 9px; padding: 10px 12px; background: #2d1c1f; border: 1px solid #59303a; border-radius: 5px; color: #ffb3ad; font-size: 11px; }
  .sb-alert svg { color: var(--danger); flex: 0 0 auto; }
  .sb-alert span { flex: 1; }

@@ -81,12 +81,15 @@ try {
     assert.deepEqual(overlap, []);
   });
 
-  check('move preserves status and assignee', () => {
-    assert.equal(moved.body.status, task.status);
+  check('move enters the sprint through To Do and keeps the assignee', () => {
+    assert.equal(moved.body.status, 'todo');
     assert.equal(moved.body.assignee, task.assignee);
   });
 
-  await fetch(`${BASE}/tasks/${task.key}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${globalThis.authToken}` }, body: JSON.stringify({ storyPoints: 5, status: 'done' }) });
+  // A sprint task advances one validated stage at a time: To Do -> In Progress -> Review -> Done.
+  await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ storyPoints: 5, status: 'progress' }) });
+  await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ status: 'review' }) });
+  await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ status: 'done' }) });
   const { body: afterDone } = await api(`/sprints/${sprintId}`);
   check('progress uses completed story points / committed', () => {
     assert.equal(afterDone.progress.totalStoryPoints, 5);
@@ -95,16 +98,20 @@ try {
     assert.equal(afterDone.progress.progressPercent, 100);
   });
 
-  const removed = await api(`/sprints/${sprintId}/tasks/${task.key}`, { method: 'DELETE' });
+  // Only To Do work may leave a sprint; return a second item while it is still To Do.
+  const returnable = backlogAfter[0];
+  const addedForReturn = await api(`/sprints/${sprintId}/tasks`, { method: 'POST', body: JSON.stringify({ key: returnable.key }) });
+  check('a second To Do item can enter the sprint', () => assert.equal(addedForReturn.status, 201));
+  const removed = await api(`/sprints/${sprintId}/tasks/${returnable.key}`, { method: 'DELETE' });
   check('removing a task returns 200', () => assert.equal(removed.status, 200));
   const { body: backlogRestored } = await api('/backlog');
   const { body: sprintTasksRestored } = await api(`/sprints/${sprintId}/tasks`);
   check('removed task is back in the product backlog', () => {
-    assert.equal(backlogRestored.some((t) => t.key === task.key), true);
-    assert.equal(sprintTasksRestored.some((t) => t.key === task.key), false);
+    assert.equal(backlogRestored.some((t) => t.key === returnable.key), true);
+    assert.equal(sprintTasksRestored.some((t) => t.key === returnable.key), false);
   });
   const { body: afterRemove } = await api(`/sprints/${sprintId}`);
-  check('progress recalculates after removal', () => assert.equal(afterRemove.progress.progressPercent, 0));
+  check('progress reflects the completed work that stayed in the sprint', () => assert.equal(afterRemove.progress.progressPercent, 100));
 
   const created = await api('/sprints', { method: 'POST', body: JSON.stringify({ name: 'Sprint 15', goal: 'Lifecycle', startDate: '2026-11-02' }) });
   check('creating a sprint derives a 14-day range', () => {
@@ -144,8 +151,8 @@ try {
   const { status: missingTask } = await api(`/sprints/${sprintId}/tasks`, { method: 'POST', body: JSON.stringify({ key: 'KAN-999' }) });
   check('rejects unknown task key', () => assert.equal(missingTask, 404));
 
-  const { body: finalSprint } = await api(`/sprints/${sprintId}`);
-  check('empty sprint reports 0% without dividing by zero', () => assert.equal(finalSprint.progress.progressPercent, 0));
+  const { body: emptySprint } = await api(`/sprints/${created.body.id}`);
+  check('empty sprint reports 0% without dividing by zero', () => assert.equal(emptySprint.progress.progressPercent, 0));
 
   const { body: boardTasks } = await api('/tasks');
   check('existing board endpoint still returns all tasks', () => assert.equal(boardTasks.length, 5));

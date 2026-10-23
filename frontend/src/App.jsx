@@ -158,9 +158,19 @@ function App() {
   }
 
   async function updateTask(key, data) {
+    const previous = tasks.find((task) => task.key === key) ?? null;
     setTasks((current) => current.map((task) => task.key === key ? { ...task, ...data } : task));
-    const response = await fetch(`${API_BASE_URL}/api/tasks/${key}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(data) });
-    if (!response.ok) setTasks((current) => current.map((task) => task.key === key ? { ...task, ...data } : task));
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/tasks/${key}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(data) });
+      if (response.ok) return;
+      const payload = await response.json().catch(() => null);
+      setAuthError(payload?.error || `Could not update the task (HTTP ${response.status}).`);
+    } catch {
+      setAuthError('Could not reach the server. The task was not updated.');
+    }
+    // Roll the optimistic change back to the last server-confirmed value so a rejected
+    // transition never leaves the board showing a move that the API refused.
+    setTasks((current) => current.map((task) => task.key === key && previous ? previous : task));
   }
 
   async function createTask(event) {
@@ -236,9 +246,11 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: form.get('email'), password: form.get('password'), name: form.get('name') })
       });
-      const payload = await response.json().catch(() => ({}));
+      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setAuthError(payload.error || 'Authentication failed.');
+        // Always surface the HTTP status: a generic message hides whether the
+        // request never reached the API, hit the rate limiter, or was rejected.
+        setAuthError(payload?.error || `Authentication failed (HTTP ${response.status}).`);
         return;
       }
       if (authMode === 'signup') {

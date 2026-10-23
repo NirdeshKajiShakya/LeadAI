@@ -9,6 +9,11 @@ import fs from 'node:fs';
 import { Task } from './models/Task.js';
 import { Sprint } from './models/Sprint.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
+import { sortBacklog } from './lib/backlogOrder.js';
+import {
+  BACKLOG_STATUS, SPRINT_ENTRY_STATUS, isPermittedSprintStatusChange,
+  sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
+} from './lib/taskTransitions.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
 import { connectDatabase, databaseStatus } from './db.js';
 import { Board } from './models/Board.js';
@@ -653,8 +658,11 @@ app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
 });
 app.get('/api/backlog', requireAuth, async (req, res, next) => {
   try {
-    const tasks = await store.listWithoutSprint();
-    res.json((await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean));
+    // Sprints are owner-scoped, so an owner-scoped query is what keeps the Product
+    // Backlog consistent with the sprint list (and avoids loading other developers' rows).
+    const tasks = await store.listWithoutSprint(userId(req));
+    const accessible = (await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean);
+    res.json(sortBacklog(accessible));
   } catch (error) { next(error); }
 });
 app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
@@ -664,7 +672,10 @@ app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
     const key = String(req.body?.key || '');
     const task = await store.find(key);
     if (!task || !(await canAccess(task, req))) return res.status(404).json({ error: 'Task not found.' });
-    const updated = await store.update(key, { sprintId: sprintId(sprint) });
+    const blocked = sprintAcceptsBacklogItem(sprint, task);
+    if (blocked) return res.status(409).json({ error: blocked });
+    // Entering a sprint always lands in To Do, never in a later stage.
+    const updated = await store.update(key, { sprintId: sprintId(sprint), status: SPRINT_ENTRY_STATUS });
     res.status(201).json(updated);
   } catch (error) { next(error); }
 });
@@ -674,7 +685,10 @@ app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) =>
     if (!sprint) return;
     const task = await store.find(req.params.key);
     if (!task || !(await canAccess(task, req)) || String(task.sprintId) !== sprintId(sprint)) return res.status(404).json({ error: 'Task not found in sprint.' });
-    await store.update(task.key, { sprintId: null });
+    const blocked = taskCanReturnToBacklog(task);
+    if (blocked) return res.status(409).json({ error: blocked });
+    // Only the sprint assignment is removed; the task record itself is preserved.
+    await store.update(task.key, { sprintId: null, status: BACKLOG_STATUS });
     res.json({ ok: true });
   } catch (error) { next(error); }
 });
@@ -692,14 +706,20 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
     validateTaskInput(req.body || {});
     const board = req.body.boardId ? await authorizedBoard({ ...req, params: { id: req.body.boardId } }, res) : await defaultBoardFor(req);
     if (!board) return res.status(404).json({ error: 'Create a board before adding tasks.' });
-    if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
+    let sprint = null;
+    if (req.body.sprintId) {
+      sprint = await sprintStore.find(req.body.sprintId, userId(req));
+      if (!sprint) return res.status(404).json({ error: 'Sprint not found.' });
+      const blocked = sprintAcceptsBacklogItem(sprint, { sprintId: null, ownerId: userId(req), boardId: boardId(board) });
+      if (blocked) return res.status(409).json({ error: blocked });
+    }
     let key;
     do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
     const task = await store.create({
       key, ownerId: userId(req), boardId: boardId(board), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
-      status: req.body.status || 'backlog', priority: req.body.priority || 'medium',
+      status: sprint ? SPRINT_ENTRY_STATUS : req.body.status || BACKLOG_STATUS, priority: req.body.priority || 'medium',
       labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
-      dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
+      dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: sprint ? sprintId(sprint) : null, storyPoints: req.body.storyPoints || 0,
       comments: [], attachments: [], dependencies: []
     });
     res.status(201).json(task);
@@ -710,8 +730,18 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     const task = await authorizedTask(req, res);
     if (!task) return;
     validateTaskInput(req.body || {}, true);
-    if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
+    if (req.body.sprintId !== undefined && String(req.body.sprintId ?? '') !== String(task.sprintId ?? '')) {
+      // Sprint assignment is a validated transition, not a generic field edit: going
+      // through one endpoint keeps "enter only via To Do" and the active-sprint checks intact.
+      return res.status(409).json({ error: 'Use the sprint backlog to move a task between the Product Backlog and a sprint.' });
+    }
     const updates = taskUpdates(req.body);
+    delete updates.sprintId;
+    if (updates.status !== undefined && task.sprintId && !isPermittedSprintStatusChange(task.status, updates.status)) {
+      return res.status(409).json({
+        error: `A sprint task cannot move directly from ${statusLabel(task.status)} to ${statusLabel(updates.status)}.`
+      });
+    }
     if (updates.title !== undefined) updates.title = updates.title.trim();
     if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
     if (updates.labels) updates.labels = [...new Set(updates.labels)];
