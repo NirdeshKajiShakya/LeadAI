@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
-  Sparkles, Target,UserRound, Users, X, Zap, LoaderCircle
+  Sparkles, Target, UserRound, Users, X, Zap, LoaderCircle, Clock3, Mail, Shield, Trash2
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
@@ -57,8 +57,14 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const handlePopState = () => setPathname(window.location.pathname);
+    const handlePopState = () => {
+      setPathname(window.location.pathname);
+      const boardIdFromUrl = new URLSearchParams(window.location.search).get('boardId');
+      if (boardIdFromUrl) setActiveBoardId(boardIdFromUrl);
+    };
     window.addEventListener('popstate', handlePopState);
+    const boardIdFromUrl = new URLSearchParams(window.location.search).get('boardId');
+    if (boardIdFromUrl) setActiveBoardId(boardIdFromUrl);
     if (!token) {
       setLoading(false);
       return () => window.removeEventListener('popstate', handlePopState);
@@ -319,7 +325,7 @@ function App() {
   return <div className="app-shell">
     <header className="topbar">
       <button className="brand-lockup" onClick={() => navigate('/')}><div className="logo-mark"><span></span><span></span><span></span></div><strong>LeadAI</strong></button>
-      <div className="board-breadcrumb" aria-label="Board location"><span>Workspace</span><b>/</b><span>Projects</span><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{boards.find((board) => board.id === activeBoardId)?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></div>
+      <div className="board-breadcrumb" aria-label="Page location"><span>Workspace</span><b>/</b><span>{pathname === '/team' ? 'Team & Workspace' : 'Projects'}</span>{pathname !== '/team' && <><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{boards.find((board) => board.id === activeBoardId)?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></>}</div>
       <div className="topbar-actions">
         <label className="global-search"><Search size={15} /><input placeholder="Search tasks, comments, agents..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
         <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
@@ -334,7 +340,7 @@ function App() {
       </aside>
       <main className="main-content">
         {authError && <div className="form-error" role="alert">{authError}<button type="button" onClick={() => setAuthError('')} aria-label="Dismiss error"><X size={13} /></button></div>}
-        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname === '/settings' ? <SettingsPage token={token} navigate={navigate} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
+        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} navigate={navigate} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname === '/settings' ? <SettingsPage token={token} navigate={navigate} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
         <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{user?.name ? `${user.name}'s board` : 'My board'}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(true)}><Bolt size={15} /> AI Auto-Triage</button><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>
@@ -406,11 +412,17 @@ function Copilot({ messages, input, setInput, onSubmit, onClose, isAnalyzing }) 
     </form>
   </div>;
 }
-function BoardManager({ token, boards, setBoards, activeBoardId }) {
+function BoardManager({ token, boards, setBoards, navigate }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [role, setRole] = useState('Member');
   const [error, setError] = useState('');
-  const active = boards.find((board) => board.id === activeBoardId) || boards[0];
+  const [modal, setModal] = useState(null);
+  const [selectedBoard, setSelectedBoard] = useState(null);
+  const [menuBoardId, setMenuBoardId] = useState(null);
+  const [stats, setStats] = useState({});
+  const [busy, setBusy] = useState(false);
+  const authHeaders = { Authorization: `Bearer ${token}` };
   async function request(path, options = {}) {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...options,
@@ -421,33 +433,66 @@ function BoardManager({ token, boards, setBoards, activeBoardId }) {
     return body;
   }
   async function refresh() { setBoards(await request('/api/boards')); }
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(boards.map(async (board) => {
+      const response = await fetch(`${API_BASE_URL}/api/tasks?boardId=${encodeURIComponent(board.id)}`, { headers: authHeaders });
+      return [board.id, response.ok ? await response.json() : []];
+    })).then((entries) => {
+      if (!cancelled) setStats(Object.fromEntries(entries.map(([id, tasks]) => [id, {
+        total: tasks.length,
+        done: tasks.filter((task) => task.status === 'done').length,
+        updatedAt: tasks.reduce((latest, task) => Math.max(latest, new Date(task.updatedAt || task.createdAt || 0).getTime()), 0)
+      }])));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [boards]);
   async function create(event) {
     event.preventDefault();
-    try { await request('/api/boards', { method: 'POST', body: JSON.stringify({ name }) }); setName(''); setError(''); await refresh(); }
+    if (!name.trim()) return;
+    try { setBusy(true); await request('/api/boards', { method: 'POST', body: JSON.stringify({ name: name.trim() }) }); setName(''); setError(''); setModal(null); await refresh(); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  }
+  async function rename(board) {
+    const nextName = window.prompt('New board name', board.name);
+    if (!nextName?.trim()) return;
+    try { await request(`/api/boards/${board.id}`, { method: 'PATCH', body: JSON.stringify({ name: nextName.trim() }) }); setError(''); await refresh(); }
     catch (requestError) { setError(requestError.message); }
   }
-  async function rename() {
-    const nextName = window.prompt('New board name', active?.name);
-    if (!active || nextName === null) return;
-    try { await request(`/api/boards/${active.id}`, { method: 'PATCH', body: JSON.stringify({ name: nextName }) }); setError(''); await refresh(); }
-    catch (requestError) { setError(requestError.message); }
-  }
-  async function remove() {
-    if (!active || !window.confirm(`Delete "${active.name}" and its tasks? This cannot be undone.`)) return;
-    try { await request(`/api/boards/${active.id}`, { method: 'DELETE' }); setError(''); await refresh(); }
+  async function remove(board) {
+    if (!window.confirm(`Delete "${board.name}" and its tasks? This cannot be undone.`)) return;
+    try { await request(`/api/boards/${board.id}`, { method: 'DELETE' }); setError(''); setMenuBoardId(null); await refresh(); }
     catch (requestError) { setError(requestError.message); }
   }
   async function invite(event) {
     event.preventDefault();
-    try { await request(`/api/boards/${active.id}/members`, { method: 'POST', body: JSON.stringify({ email }) }); setEmail(''); setError(''); await refresh(); }
+    if (!selectedBoard) return;
+    try { setBusy(true); await request(`/api/boards/${selectedBoard.id}/members`, { method: 'POST', body: JSON.stringify({ email: email.trim(), role }) }); setEmail(''); setRole('Member'); setError(''); setModal(null); await refresh(); }
     catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
   }
-  return <section className="route-page"><div className="route-hero"><div className="eyebrow">Team & Workspace</div><h1>Kanban boards</h1><p>Create focused boards, name them, and invite teammates to collaborate.</p></div><div className="board-manager">
-    <form className="board-create-form" onSubmit={create}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="New board name" maxLength={120} required /><button className="primary-button"><Plus size={15} /> Create board</button></form>
+  const owned = boards.filter((board) => board.isOwner);
+  const shared = boards.filter((board) => !board.isOwner);
+  const initials = (person) => String(person.name || person.email || '?').split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase();
+  const formatActive = (timestamp) => timestamp ? `${Math.max(1, Math.round((Date.now() - timestamp) / 86400000))}d ago` : 'No activity yet';
+  const renderCard = (board) => {
+    const stat = stats[board.id] || { total: 0, done: 0, updatedAt: 0 };
+    const percent = stat.total ? Math.round((stat.done / stat.total) * 100) : 0;
+    return <article className="team-board-card" key={board.id}>
+      <div className="team-board-card-head"><span className={`team-role-badge ${board.isOwner ? 'is-owner' : ''}`}>{board.isOwner ? 'Owner' : 'Member'}</span><div className="team-menu-wrap"><button className="team-icon-button" onClick={() => setMenuBoardId(menuBoardId === board.id ? null : board.id)} aria-label={`Actions for ${board.name}`}><MoreHorizontal size={18} /></button>{menuBoardId === board.id && <div className="team-action-menu"><button onClick={() => rename(board)}><Pencil size={14} /> Rename</button>{board.isOwner && <button className="is-danger" onClick={() => remove(board)}><Trash2 size={14} /> Delete</button>}</div>}</div></div>
+      <button className="team-board-open" onClick={() => navigate(`/board?boardId=${encodeURIComponent(board.id)}`)}><h3>{board.name}</h3><p>{board.isOwner ? 'Your workspace board for focused delivery.' : 'A board shared with you for collaboration.'}</p><div className="team-board-meta"><span><Users size={14} /> {board.memberIds.length} member{board.memberIds.length === 1 ? '' : 's'}</span><span><Clock3 size={14} /> {formatActive(stat.updatedAt)}</span></div></button>
+      <div className="team-board-footer"><div className="team-member-stack">{(board.members || []).slice(0, 4).map((member) => <span key={member.id} title={member.email}>{initials(member)}</span>)}{board.members?.length > 4 && <span className="is-more">+{board.members.length - 4}</span>}</div><span className="team-completion"><Check size={13} /> {percent}% complete</span></div>
+      {board.isOwner && <button className="team-invite-link" onClick={() => { setSelectedBoard(board); setModal('invite'); }}><Mail size={14} /> Invite member</button>}
+    </article>;
+  };
+  return <section className="route-page team-page"><div className="team-page-header"><div><div className="eyebrow">Team & Workspace</div><h1>Workspace & Boards</h1><p>Organize ownership, collaboration, and delivery from one focused space.</p></div><button className="primary-button" onClick={() => setModal('create')}><Plus size={16} /> New Board</button></div>
     {error && <div className="form-error" role="alert">{error}</div>}
-    {boards.map((board) => <article className={`board-manager-card ${board.id === active?.id ? 'is-active' : ''}`} key={board.id}><div><strong>{board.name}</strong><small>{board.isOwner ? 'Owner' : 'Member'} · {board.memberIds.length} member{board.memberIds.length === 1 ? '' : 's'}</small></div>{board.id === active?.id && board.isOwner && <div className="board-manager-actions"><button className="secondary-button" onClick={rename}>Rename</button><button className="secondary-button danger-button" onClick={remove}>Delete</button></div>}</article>)}
-    {active?.isOwner && <form className="board-invite-form" onSubmit={invite}><h2>Invite to {active.name}</h2><p>Enter the email address of an existing LeadAI account.</p><div><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@example.com" required /><button className="secondary-button"><Users size={15} /> Add member</button></div></form>}
-  </div></section>;
+    <section className="team-section"><div className="team-section-heading"><div><h2>My Boards</h2><p>Boards you own and manage.</p></div><span>{owned.length} board{owned.length === 1 ? '' : 's'}</span></div><div className="team-board-grid">{owned.length ? owned.map(renderCard) : <div className="team-empty">Create your first board to get started.</div>}</div></section>
+    <section className="team-section"><div className="team-section-heading"><div><h2>Shared Boards</h2><p>Boards where you collaborate as a member.</p></div><span>{shared.length} board{shared.length === 1 ? '' : 's'}</span></div><div className="team-board-grid">{shared.length ? shared.map(renderCard) : <div className="team-empty">Shared boards will appear here when someone invites you.</div>}</div></section>
+    <section className="team-members-card"><div className="team-section-heading"><div><h2>Team Members</h2><p>People with access to your owned boards.</p></div><Users size={18} /></div><div className="team-member-table">{owned.flatMap((board) => (board.members || []).map((member) => ({ ...member, boardName: board.name, boardId: board.id }))).map((member) => <div className="team-member-row" key={`${member.boardId}-${member.id}`}><span className="team-table-avatar">{initials(member)}</span><div><strong>{member.name}</strong><small>{member.email}</small></div><span className="team-member-board">{member.boardName}</span><span className="team-member-role"><Shield size={13} /> Member</span></div>)}{!owned.some((board) => board.members?.length) && <div className="team-empty">No teammates have been added yet.</div>}</div></section>
+    {modal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setModal(null)}><div className="team-modal" role="dialog" aria-modal="true" aria-labelledby="team-modal-title"><div className="modal-heading"><div><div className="eyebrow">{modal === 'create' ? 'Workspace setup' : 'Board access'}</div><h2 id="team-modal-title">{modal === 'create' ? 'Create a new board' : `Invite to ${selectedBoard?.name}`}</h2></div><button className="team-icon-button" onClick={() => setModal(null)} aria-label="Close dialog"><X size={17} /></button></div>{modal === 'create' ? <form onSubmit={create}><label>Board name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} placeholder="e.g. Product launch" autoFocus required /></label><div className="team-modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={busy}><Plus size={15} /> Create board</button></div></form> : <form onSubmit={invite}><label>Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="teammate@example.com" autoFocus required /></label><label>Role<select value={role} onChange={(event) => setRole(event.target.value)}><option>Admin</option><option>Member</option><option>Viewer</option></select></label><div className="team-modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={busy}><Mail size={15} /> Send invite</button></div></form>}</div></div>}
+  </section>;
 }
 function RoutePage({ pathname, navigate, user, onSignIn }) {
   const displayName = user?.name || 'your account';
