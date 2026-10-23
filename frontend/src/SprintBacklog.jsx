@@ -19,6 +19,13 @@ const sprintGroups = [
 
 const initials = (name = '') => name.split(' ').filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || '?';
 
+// Only an active sprint (its date window contains today) can accept backlog items, so
+// prefer it when the page opens instead of defaulting to the oldest sprint.
+function pickSprintId(list, current) {
+  if (current && list.some((sprint) => sprint.id === current)) return current;
+  return list.find((sprint) => sprint.current?.state === 'active')?.id ?? list[0]?.id ?? null;
+}
+
 async function request(path, token, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -50,7 +57,7 @@ export default function SprintBacklog({ token }) {
   const loadSprints = useCallback(async () => {
     const list = await request('/api/sprints', token);
     setSprints(list);
-    setSelectedId((current) => (current && list.some((sprint) => sprint.id === current) ? current : list[0]?.id ?? null));
+    setSelectedId((current) => pickSprintId(list, current));
   }, [token]);
 
   // Sprint and product backlogs are fetched separately by the API, so a task can never
@@ -73,7 +80,7 @@ export default function SprintBacklog({ token }) {
         const list = await request('/api/sprints', token);
         if (!active) return;
         setSprints(list);
-        const nextId = list[0]?.id ?? null;
+        const nextId = pickSprintId(list, null);
         setSelectedId(nextId);
         const [inSprint, backlog] = await Promise.all([
           nextId ? request(`/api/sprints/${nextId}/tasks`, token) : Promise.resolve([]),
@@ -112,8 +119,11 @@ export default function SprintBacklog({ token }) {
       await refreshTasks(selectedId);
       await loadSprints();
     } catch (mutationError) {
-      // Lists are left untouched on failure so the UI never shows a change the API rejected.
       setError(mutationError.message);
+      // Re-read authoritative state even on failure, so a rejected (or partially applied)
+      // mutation can never leave these lists out of sync with the database.
+      await refreshTasks(selectedId).catch(() => {});
+      await loadSprints().catch(() => {});
     } finally {
       setPendingKey(null);
     }
@@ -129,6 +139,7 @@ export default function SprintBacklog({ token }) {
 
   const visibleSprintTasks = sprintTasks.filter(matches);
   const visibleBacklog = backlogTasks.filter(matches);
+  const selectedIsActive = selected?.current?.state === 'active';
   const totals = selected?.progress ?? { totalStoryPoints: 0, completedStoryPoints: 0, remainingStoryPoints: 0, progressPercent: 0 };
 
   return <section className="sb-page">
@@ -200,18 +211,23 @@ export default function SprintBacklog({ token }) {
           </header>
           {groupTasks.length === 0
             ? <div className="sb-empty-row">No issues in {group.label.toLowerCase()}</div>
-            : <div className="sb-list">{groupTasks.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="remove" onAction={removeFromSprint} />)}</div>}
+            : <div className="sb-list">{groupTasks.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="remove" onAction={removeFromSprint} disabled={task.status !== 'todo'} disabledReason="Only To Do tasks can return to the Product Backlog." />)}</div>}
         </section>;
       })}
 
       <section className="sb-group sb-backlog">
         <header className="sb-group-head">
-          <div><ChevronDown size={15} /><strong>Product Backlog</strong><em>Unscheduled work</em></div>
+          <div><ChevronDown size={15} /><strong>Product Backlog</strong><em>Unscheduled work · priority first, then oldest</em></div>
           <span className="sb-group-count">{backlogTasks.length} issues · {backlogTasks.reduce((sum, task) => sum + (Number(task.storyPoints) || 0), 0)} SP</span>
         </header>
+        {!selectedIsActive && <div className="sb-backlog-note" role="status">
+          <AlertTriangle size={14} />
+          <span>{selected ? `"${selected.name}" is ${selected.current?.state === 'upcoming' ? 'upcoming' : 'completed'}. ` : ''}Only an active sprint can accept backlog items.</span>
+          <button className="secondary-button" onClick={() => setEditing({ mode: 'create' })}><Plus size={14} /> New Sprint</button>
+        </div>}
         {backlogTasks.length === 0
           ? <div className="sb-empty-row">Every task is committed to a sprint.</div>
-          : <div className="sb-list">{visibleBacklog.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="add" onAction={moveToSprint} />)}</div>}
+          : <div className="sb-list">{visibleBacklog.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="add" onAction={moveToSprint} disabled={!selectedIsActive} disabledReason="Select or create an active sprint first." />)}</div>}
       </section>
     </>}
 
@@ -229,21 +245,23 @@ export default function SprintBacklog({ token }) {
   </section>;
 }
 
-function SprintTaskRow({ task, busy, action, onAction }) {
+function SprintTaskRow({ task, busy, action, onAction, disabled = false, disabledReason = '' }) {
+  const labels = Array.isArray(task.labels) ? task.labels : [];
+  const priority = priorityLabels[task.priority] ? task.priority : 'medium';
   return <article className={`sb-row ${busy ? 'is-busy' : ''}`}>
     <span className="sb-row-key">#{task.key}</span>
     <div className="sb-row-main">
       <h3>{task.title}</h3>
       <div className="sb-row-tags">
-        {task.labels.map((label) => <span key={label} className="sb-tag">{label}</span>)}
-        <span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span>
+        {labels.map((label) => <span key={label} className="sb-tag">{label}</span>)}
+        <span className={`priority ${priorityClass[priority]}`}>{priorityLabels[priority]}</span>
         <span className="sb-points">{task.storyPoints || 0} SP</span>
       </div>
     </div>
     <span className="sb-row-assignee"><i>{initials(task.assignee)}</i>{task.assignee}</span>
     {action === 'add'
-      ? <button className="secondary-button sb-action" disabled={busy} onClick={() => onAction(task.key)}><ArrowRight size={14} /> Move to Sprint</button>
-      : <button className="secondary-button sb-action" disabled={busy} onClick={() => onAction(task.key)}><ArrowLeft size={14} /> Return to Backlog</button>}
+      ? <button className="secondary-button sb-action" disabled={busy || disabled} title={disabled ? disabledReason : undefined} onClick={() => onAction(task.key)}><ArrowRight size={14} /> Move to Sprint</button>
+      : <button className="secondary-button sb-action" disabled={busy || disabled} title={disabled ? disabledReason : undefined} onClick={() => onAction(task.key)}><ArrowLeft size={14} /> Return to Backlog</button>}
   </article>;
 }
 
