@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Activity, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
+  Activity, AlertTriangle, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
   Sparkles, Target,UserRound, Users, X, Zap
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
+import Dashboard from './Dashboard.jsx';
+import { isCalendarDate } from './sprintDates.js';
 
 const columns = [
   { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
@@ -53,6 +55,11 @@ function App() {
     { role: 'assistant', text: 'Your board is synced. Ask me to create, triage, or summarize your work.', timestamp: Date.now() }
   ]);
   const [loading, setLoading] = useState(true);
+  const [dashboardRefresh, setDashboardRefresh] = useState(0);
+  const [pendingTask, setPendingTask] = useState(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [homeSummary, setHomeSummary] = useState(null);
+  const [homeAiFocus, setHomeAiFocus] = useState(0);
 
   useEffect(() => {
     const handlePopState = () => setPathname(window.location.pathname);
@@ -92,6 +99,21 @@ function App() {
   }, [token, activeBoardId]);
 
   useEffect(() => {
+    setNotificationsOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!notificationsOpen) return undefined;
+    function handlePointerDown(event) {
+      if (event.target instanceof Element && !event.target.closest('.notification-wrap')) {
+        setNotificationsOpen(false);
+      }
+    }
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [notificationsOpen]);
+
+  useEffect(() => {
     if (!boards.length) {
       setActiveBoardId('');
     } else if (!boards.some((board) => board.id === activeBoardId)) {
@@ -99,9 +121,40 @@ function App() {
     }
   }, [boards, activeBoardId]);
 
+  // A dashboard task opens the existing board edit modal once that board's tasks
+  // are loaded, so the task detail is always the real, server-backed record.
+  useEffect(() => {
+    if (!pendingTask || activeBoardId !== pendingTask.boardId) return;
+    const task = tasks.find((item) => item.key === pendingTask.key);
+    if (!task) return;
+    setPendingTask(null);
+    openEdit(task);
+  }, [tasks, pendingTask, activeBoardId]);
+
   function switchBoard(boardId) {
     setActiveBoardId(boardId);
-    navigate('/board');
+    // On Home the board selector is a workspace filter, not a navigation
+    // control. Everywhere else it opens the board that was picked.
+    if (pathname !== '/') navigate('/board');
+  }
+
+  async function signOut() {
+    try {
+      if (token) {
+        await fetch(`${API_BASE_URL}/api/auth/signout`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      }
+    } catch {
+      // Clearing the local session is still the right outcome when the API is
+      // unreachable; the token will simply expire on the server.
+    }
+    sessionStorage.removeItem('leadai-session');
+    setNotificationsOpen(false);
+    setHomeSummary(null);
+    setToken(null);
+    setUser(null);
   }
 
   function openBoardDialog(mode) {
@@ -126,7 +179,10 @@ function App() {
       const listResponse = await fetch(`${API_BASE_URL}/api/boards`, { headers: { Authorization: `Bearer ${token}` } });
       const list = await listResponse.json();
       setBoards(list);
-      if (boardDialog === 'create') setActiveBoardId(payload.id);
+      if (boardDialog === 'create') {
+        setActiveBoardId(payload.id);
+        setDashboardRefresh((value) => value + 1);
+      }
       setBoardDialog(null);
       setBoardName('');
     } catch (error) {
@@ -141,6 +197,38 @@ function App() {
     setPathname(path);
   }
 
+  function handleSessionExpired() {
+    sessionStorage.removeItem('leadai-session');
+    window.history.replaceState({}, '', '/');
+    setPathname('/');
+    setToken(null);
+    setUser(null);
+  }
+
+  function openDashboardBoard(id) {
+    if (!id) return;
+    setActiveBoardId(id);
+    navigate('/board');
+  }
+
+  function openDashboardTask(task) {
+    if (!task?.key || !task.boardId) return;
+    setPendingTask({ key: task.key, boardId: task.boardId });
+    setActiveBoardId(task.boardId);
+    navigate('/board');
+  }
+
+  async function handleGeneratedBoard(board) {
+    if (!board?.id) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/boards`, { headers: { Authorization: `Bearer ${token}` } });
+      if (response.ok) setBoards(await response.json());
+    } catch {
+      // The board route fetches its own data; navigation must not be blocked here.
+    }
+    openDashboardBoard(board.id);
+  }
+
   const labels = useMemo(() => [...new Set(tasks.flatMap((task) => task.labels))].slice(0, 5), [tasks]);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const matchesQuery = `${task.key} ${task.title} ${task.description} ${task.assignee}`.toLowerCase().includes(query.toLowerCase());
@@ -152,6 +240,19 @@ function App() {
   const inFlight = tasks.filter((task) => task.status === 'progress').length;
   const completionRate = tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
   const workspaceName = user?.name ? `${user.name}'s workspace` : 'My workspace';
+  const isHome = pathname === '/';
+  const activeBoard = boards.find((board) => board.id === activeBoardId) || null;
+  const now = new Date();
+  const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const overdueBoardTasks = tasks.filter((task) => (
+    task.status !== 'done' && isCalendarDate(task.dueDate) && task.dueDate < todayIso
+  ));
+  const useSprintProgress = Boolean(isHome && homeSummary?.activeSprint);
+  const shellProgress = useSprintProgress
+    ? Math.max(0, Math.min(100, Number(homeSummary?.stats?.sprintProgress) || 0))
+    : completionRate;
+  const shellProgressLabel = useSprintProgress ? 'Sprint progress' : 'Board completion';
+  const aiConfigured = homeSummary?.ai?.configured;
 
   function updateProfileUser(profile) {
     setUser((current) => ({ ...(current || {}), ...profile }));
@@ -314,13 +415,68 @@ function App() {
     if (key) updateTask(key, { status });
   }
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${isHome ? 'is-home' : ''}`}>
     <header className="topbar">
       <button className="brand-lockup" onClick={() => navigate('/')}><div className="logo-mark"><span></span><span></span><span></span></div><strong>LeadAI</strong></button>
-      <div className="board-breadcrumb" aria-label="Board location"><span>Workspace</span><b>/</b><span>Projects</span><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{boards.find((board) => board.id === activeBoardId)?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></div>
+      {isHome ? (
+        <div className="home-workspace-control" title={activeBoard ? `Viewing ${activeBoard.name}` : 'No boards yet'}>
+          <Zap size={13} className="home-workspace-icon" aria-hidden="true" />
+          <label className="home-board-select">
+            <select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}>
+              {boards.length ? boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>) : <option value="">No boards yet</option>}
+            </select>
+            <ChevronDown size={12} aria-hidden="true" />
+          </label>
+        </div>
+      ) : (
+        <div className="board-breadcrumb" aria-label="Board location"><span>Workspace</span><b>/</b><span>Projects</span><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{activeBoard?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></div>
+      )}
       <div className="topbar-actions">
-        <label className="global-search"><Search size={15} /><input placeholder="Search tasks, comments, agents..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
+        <label className="global-search"><Search size={15} aria-hidden="true" /><input placeholder="Search tasks..." aria-label="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && isHome) { event.preventDefault(); navigate('/board'); } }} /></label>
+        <div className="notification-wrap">
+          <IconButton label={overdueBoardTasks.length ? `Notifications: ${overdueBoardTasks.length} overdue` : 'Notifications'} active={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}>
+            <Bell size={16} />
+            {overdueBoardTasks.length > 0 && <span className="home-notification-dot" aria-hidden="true" />}
+          </IconButton>
+          {notificationsOpen && (
+            <>
+              <section className="home-notifications" role="dialog" aria-label="Notifications">
+                <header>
+                  <div>
+                    <strong>Notifications</strong>
+                    <span>{overdueBoardTasks.length ? `${overdueBoardTasks.length} overdue on ${activeBoard?.name || 'this board'}` : `No overdue tasks on ${activeBoard?.name || 'this board'}`}</span>
+                  </div>
+                  <button type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close notifications"><X size={14} /></button>
+                </header>
+                {overdueBoardTasks.length ? (
+                  <ul>
+                    {overdueBoardTasks.slice(0, 4).map((task) => (
+                      <li key={task.key}>
+                        <button type="button" onClick={() => { setNotificationsOpen(false); openDashboardTask(task); }}>
+                          <span className="home-notification-icon"><AlertTriangle size={13} aria-hidden="true" /></span>
+                          <span><strong>{task.key} · {task.title}</strong><small>Due {task.dueDate} · {task.assignee || 'Unassigned'}</small></span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="home-notifications-empty"><Check size={14} aria-hidden="true" /> You are clear. No overdue tasks on this board.</p>
+                )}
+                <footer><button type="button" onClick={() => { setNotificationsOpen(false); navigate('/backlog'); }}>Open sprint backlog <ArrowRight size={12} aria-hidden="true" /></button></footer>
+              </section>
+            </>
+          )}
+        </div>
+        {isHome ? (
+          <>
+            <button type="button" className="text-button home-signout" onClick={signOut}>Sign Out</button>
+            <button type="button" className="home-generate" onClick={() => setHomeAiFocus((value) => value + 1)}><Sparkles size={12} aria-hidden="true" /><span>Generate</span></button>
+            <span className="home-action-divider" aria-hidden="true" />
+          </>
+        ) : (
+          <button type="button" className="text-button" onClick={signOut}>Sign Out</button>
+        )}
+        <button type="button" className={`profile-avatar ${isHome ? 'home-avatar' : ''}`} aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
       </div>
     </header>
     <div className="workspace-layout">
@@ -328,18 +484,18 @@ function App() {
         <div className="mobile-menu"><Menu size={18} /></div>
         <div className="nav-section"><div className="nav-label">Workspace</div><NavItem active={pathname === '/'} onClick={() => navigate('/')} icon={<LayoutGrid size={15} />} label="Home" /><NavItem active={pathname === '/board'} onClick={() => navigate('/board')} icon={<Target size={15} />} label="Kanban Board" badge="Live" /><NavItem active={pathname === '/backlog'} onClick={() => navigate('/backlog')} icon={<List size={15} />} label="Sprint Backlog" /></div>
         <div className="nav-section"><div className="nav-label">Operations</div><NavItem active={pathname === '/automations'} onClick={() => navigate('/automations')} icon={<Sparkles size={15} />} label="Automations" /><NavItem active={pathname === '/team'} onClick={() => navigate('/team')} icon={<Users size={15} />} label="Team & Workspace" /><NavItem active={pathname === '/settings'} onClick={() => navigate('/settings')} icon={<Settings2 size={15} />} label="Settings" /><NavItem active={pathname === '/profile' || pathname === '/profile/edit'} onClick={() => navigate('/profile')} icon={<UserRound size={15} />} label="Profile" /></div>
-        <div className="sidebar-footer"><div className="quota-copy"><span>Tasks on your board</span><strong>{tasks.length} total</strong></div><div className="quota-bar"><span></span></div><div className="ai-active"><span></span> AI Copilot Active <Zap size={14} /></div></div>
+        <div className="sidebar-footer"><div className="quota-card"><div className="quota-copy"><span>{shellProgressLabel}</span><strong>{shellProgress}%</strong></div><div className="quota-bar" role="progressbar" aria-label={shellProgressLabel} aria-valuemin={0} aria-valuemax={100} aria-valuenow={shellProgress}><span style={{ width: `${shellProgress}%` }} /></div></div><div className={`ai-active ${aiConfigured === false ? 'is-offline' : ''}`}><span></span>{aiConfigured === false ? 'AI Copilot Offline' : aiConfigured ? 'AI Copilot Active' : 'AI Copilot'}<Zap size={14} /></div></div>
       </aside>
       <main className="main-content">
         {authError && <div className="form-error" role="alert">{authError}<button type="button" onClick={() => setAuthError('')} aria-label="Dismiss error"><X size={13} /></button></div>}
-        {pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname !== '/' && pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
+        {pathname === '/' ? <Dashboard token={token} user={user} refreshKey={dashboardRefresh} navigate={navigate} onOpenBoard={openDashboardBoard} onOpenTask={openDashboardTask} onCreateBoard={() => openBoardDialog('create')} onGeneratedBoard={handleGeneratedBoard} onSessionExpired={handleSessionExpired} activeBoardId={activeBoardId} boards={boards} boardTasks={tasks} onSummary={setHomeSummary} focusAiKey={homeAiFocus} /> : pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname === '/board' ? (boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
         <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{user?.name ? `${user.name}'s board` : 'My board'}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(true)}><Bolt size={15} /> AI Auto-Triage</button><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>
         <div className={`board-layout ${copilotOpen ? '' : 'copilot-closed'}`}><section className={viewMode === 'list' ? 'task-list-view' : 'board-canvas'}>{loading ? <div className="loading-state">Loading your sprint board...</div> : viewMode === 'list' ? <TaskList tasks={filteredTasks} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} /> : columns.map((column) => <BoardColumn key={column.id} column={column} tasks={filteredTasks.filter((task) => task.status === column.id)} onDrop={handleDrop} onAdd={() => openCreate(column.id)} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} />)}</section>{copilotOpen && <Copilot messages={copilotMessages} input={copilotInput} setInput={setCopilotInput} onSubmit={sendCopilot} onClose={() => setCopilotOpen(false)} />}</div>
         <section className="velocity-panel"><div><div className="eyebrow">Your progress</div><h2>Here is how your board is tracking right now</h2></div><div className="velocity-stats"><div><strong>{tasks.length}</strong><span>Total tasks</span></div><div><strong>{inFlight}</strong><span>In progress</span></div><div><strong>{completed}</strong><span>Completed</span></div></div></section>
         {showModal && <TaskModal status={modalStatus} task={editingTask} onClose={() => { setShowModal(false); setEditingTask(null); }} onSubmit={editingTask ? saveTask : createTask} assignees={boards.find((board) => board.id === activeBoardId)?.members?.map((member) => member.name) || (user?.name ? [user.name] : [])} />}
-        </>}
+        </>) : <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} />}
         {boardDialog && <BoardDialog mode={boardDialog} name={boardName} setName={setBoardName} busy={boardBusy} onClose={() => setBoardDialog(null)} onSubmit={saveBoard} />}
       </main>
     </div>

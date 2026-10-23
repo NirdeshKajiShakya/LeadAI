@@ -9,7 +9,7 @@
     "db:setup": "node scripts/db.js setup",
     "db:check": "node scripts/db.js check",
     "db:seed": "node scripts/db.js seed",
-    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/lib/backlogApi.test.js && node server/lib/dbConfig.test.js && node server/lib/profileApi.test.js",
+    "test": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/lib/backlogApi.test.js && node server/lib/dashboard.test.js && node server/lib/aiBoardPlan.test.js && node server/lib/dashboardApi.test.js && node server/lib/dbConfig.test.js && node server/lib/profileApi.test.js",
     "test:db": "node server/lib/profileDb.test.js",
     "test:ai": "node server/lib/sprintDates.test.js && node server/lib/sprintApi.test.js && node server/ai.test.js"
   },

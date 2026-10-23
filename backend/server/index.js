@@ -25,6 +25,13 @@ import {
   findUserByEmail, findUserById
 } from './auth.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
+import {
+  BOARD_SUMMARY_LIMIT, PRIORITY_TASK_LIMIT, activeSprintsOf, isOpenTask, isOverdueTask,
+  numberOf, orderDashboardTasks, stageCounts, taskBelongsTo
+} from './lib/dashboard.js';
+import {
+  boardNameFromGoal, createBoardWithPlan, normalizeBoardGenerationRequest, planningMessage, tasksFromAiResult
+} from './lib/aiBoardPlan.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -33,6 +40,14 @@ const app = express();
 const port = Number(process.env.PORT || 4000);
 const uploadsDir = path.join(__dirname, '../uploads');
 const allowedStatuses = ['backlog', 'todo', 'progress', 'review', 'done'];
+// One board shape shared by Copilot and AI board generation.
+const BOARD_COLUMNS = [
+  { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
+  { id: 'todo', label: 'To Do', color: 'cyan', hint: 'Ready to pick up' },
+  { id: 'progress', label: 'In Progress', color: 'violet', hint: 'Active execution' },
+  { id: 'review', label: 'In Review / QA', color: 'blue', hint: 'Validate and ship' },
+  { id: 'done', label: 'Done', color: 'green', hint: 'Verified outcomes' }
+];
 const allowedPriorities = ['urgent', 'high', 'medium', 'low'];
 const rateLimits = new Map();
 let mongoReady = false;
@@ -239,6 +254,172 @@ async function authorizedSprint(req, res) {
     return null;
   }
   return sprint;
+}
+
+const DASHBOARD_TASK_SCAN_LIMIT = 1000;
+
+// Only the user's accessible boards are ever queried, and the aggregation returns
+// counters instead of documents, so a large shared database is not loaded to show
+// a handful of cards.
+async function boardOpenTaskCounts(accessibleIds) {
+  if (!accessibleIds.length) return new Map();
+  if (mongoReady) {
+    const rows = await Task.aggregate([
+      { $match: { boardId: { $in: accessibleIds } } },
+      {
+        $group: {
+          _id: '$boardId',
+          total: { $sum: 1 },
+          open: { $sum: { $cond: [{ $ne: ['$status', 'done'] }, 1, 0] } }
+        }
+      }
+    ]);
+    return new Map(rows.map((row) => [String(row._id), { total: row.total, open: row.open }]));
+  }
+  const counts = new Map(accessibleIds.map((id) => [id, { total: 0, open: 0 }]));
+  for (const task of memoryTasks) {
+    const entry = counts.get(String(task.boardId || ''));
+    if (!entry) continue;
+    entry.total += 1;
+    if (isOpenTask(task)) entry.open += 1;
+  }
+  return counts;
+}
+
+async function assignedOpenTasks(accessibleIds, names) {
+  if (!accessibleIds.length || !names.length) return [];
+  if (mongoReady) {
+    return Task.find({ boardId: { $in: accessibleIds }, assignee: { $in: names }, status: { $ne: 'done' } })
+      .select('key title status priority dueDate createdAt boardId sprintId storyPoints assignee')
+      .sort({ createdAt: 1 })
+      .limit(DASHBOARD_TASK_SCAN_LIMIT)
+      .lean();
+  }
+  return memoryTasks
+    .filter((task) => accessibleIds.includes(String(task.boardId || '')) && names.includes(String(task.assignee || '')) && isOpenTask(task))
+    .slice(0, DASHBOARD_TASK_SCAN_LIMIT);
+}
+
+async function assignedOpenTaskCounts(accessibleIds, names, today) {
+  if (!accessibleIds.length || !names.length) return { open: 0, overdue: 0 };
+  if (mongoReady) {
+    const openQuery = { boardId: { $in: accessibleIds }, assignee: { $in: names }, status: { $ne: 'done' } };
+    const [open, overdue] = await Promise.all([
+      Task.countDocuments(openQuery),
+      // Free-text due dates ("This week") are deliberately excluded; only a real
+      // calendar date can be compared with today.
+      Task.countDocuments({ ...openQuery, dueDate: { $regex: /^\d{4}-\d{2}-\d{2}$/, $lt: today } })
+    ]);
+    return { open, overdue };
+  }
+  const mine = memoryTasks.filter((task) => accessibleIds.includes(String(task.boardId || '')) && names.includes(String(task.assignee || '')) && isOpenTask(task));
+  return { open: mine.length, overdue: mine.filter((task) => isOverdueTask(task, today)).length };
+}
+
+async function buildDashboard(req) {
+  const uid = userId(req);
+  const user = req.user || {};
+  const today = todayIsoDate();
+  const boards = await boardStore.list(uid);
+  const accessibleIds = boards.map((board) => boardId(board));
+  const names = [user.name, user.email].map((value) => String(value || '').trim()).filter(Boolean);
+
+  const [boardCounts, myTasks, myCounts, sprints] = await Promise.all([
+    boardOpenTaskCounts(accessibleIds),
+    assignedOpenTasks(accessibleIds, names),
+    assignedOpenTaskCounts(accessibleIds, names, today),
+    sprintStore.list(uid)
+  ]);
+
+  const boardById = new Map(boards.map((board) => [boardId(board), board]));
+  const boardNameFor = (id) => boardById.get(String(id || ''))?.name || null;
+
+  // No active sprint is created here: the dashboard is read-only, so opening it
+  // never mutates sprint or task state.
+  const activeSprints = activeSprintsOf(sprints, today);
+  const active = activeSprints[0] || null;
+  let activeSprint = null;
+  if (active) {
+    const sprintTasks = await store.listBySprint(sprintId(active));
+    const view = sprintView(active, sprintTasks);
+    const linkedBoard = (active.boardId ? boardById.get(String(active.boardId)) : null)
+      || (sprintTasks[0]?.boardId ? boardById.get(String(sprintTasks[0].boardId)) : null);
+    activeSprint = {
+      id: view.id,
+      name: view.name,
+      goal: view.goal || '',
+      startDate: view.startDate,
+      endDate: view.endDate,
+      durationDays: view.durationDays,
+      boardId: linkedBoard ? boardId(linkedBoard) : null,
+      boardName: linkedBoard?.name || null,
+      current: view.current,
+      // Reuse the exact sprint progress calculation used by Sprint Backlog.
+      progress: view.progress,
+      stages: stageCounts(sprintTasks)
+    };
+  }
+
+  const updatedTime = (board) => {
+    const time = new Date(board.updatedAt || board.createdAt || 0).getTime();
+    return Number.isFinite(time) ? time : 0;
+  };
+
+  const boardCards = boards
+    .map((board) => {
+      const id = boardId(board);
+      const counts = boardCounts.get(id) || { total: 0, open: 0 };
+      const linkedSprint = activeSprints.find((sprint) => String(sprint.boardId || '') === id)
+        || (active && activeSprint?.boardId === id ? active : null);
+      return {
+        id,
+        name: String(board.name || 'Untitled board'),
+        isOwner: String(board.ownerId) === uid,
+        memberCount: (board.memberIds || []).length,
+        openTasks: counts.open,
+        totalTasks: counts.total,
+        updatedAt: board.updatedAt || board.createdAt || null,
+        activeSprint: linkedSprint ? {
+          id: sprintId(linkedSprint),
+          name: linkedSprint.name,
+          endDate: linkedSprint.endDate
+        } : null
+      };
+    })
+    .sort((a, b) => updatedTime(b) - updatedTime(a) || a.name.localeCompare(b.name))
+    .slice(0, BOARD_SUMMARY_LIMIT);
+
+  const priorityTasks = orderDashboardTasks(myTasks.filter((task) => taskBelongsTo(task, names)), today)
+    .slice(0, PRIORITY_TASK_LIMIT)
+    .map((task) => ({
+      key: String(task.key),
+      title: String(task.title || ''),
+      status: String(task.status || 'backlog'),
+      priority: String(task.priority || 'medium'),
+      dueDate: String(task.dueDate || ''),
+      assignee: String(task.assignee || 'Unassigned'),
+      storyPoints: numberOf(task.storyPoints),
+      boardId: String(task.boardId || ''),
+      boardName: boardNameFor(task.boardId),
+      sprintId: task.sprintId ? String(task.sprintId) : null,
+      overdue: isOverdueTask(task, today)
+    }));
+
+  return {
+    today,
+    generatedAt: new Date().toISOString(),
+    stats: {
+      boards: boards.length,
+      myOpenTasks: myCounts.open,
+      overdueTasks: myCounts.overdue,
+      activeSprints: activeSprints.length,
+      sprintProgress: activeSprint ? activeSprint.progress.progressPercent : 0
+    },
+    boards: boardCards,
+    priorityTasks,
+    activeSprint,
+    ai: { configured: Boolean(process.env.OPENROUTER_API_KEY?.trim()) }
+  };
 }
 
 function userId(req) { return String(req.user._id); }
@@ -485,6 +666,9 @@ app.get('/api/health', (_req, res) => {
   const status = databaseStatus();
   const ok = status.mode === 'memory' ? true : status.ready;
   res.status(ok ? 200 : 503).json({ ok, database: status.mode, db: status.name });
+});
+app.get('/api/dashboard/summary', requireAuth, async (req, res, next) => {
+  try { res.json(await buildDashboard(req)); } catch (error) { next(error); }
 });
 
 app.post('/api/auth/signup', async (req, res, next) => {
@@ -900,13 +1084,7 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
     const boardTasks = tasks.filter((t) => String(t.boardId || '') === boardId);
     const members = await boardMembers(board);
 
-    const columns = [
-      { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
-      { id: 'todo', label: 'To Do', color: 'cyan', hint: 'Ready to pick up' },
-      { id: 'progress', label: 'In Progress', color: 'violet', hint: 'Active execution' },
-      { id: 'review', label: 'In Review / QA', color: 'blue', hint: 'Validate and ship' },
-      { id: 'done', label: 'Done', color: 'green', hint: 'Verified outcomes' },
-    ];
+    const columns = BOARD_COLUMNS;
 
     const result = await chatWithContext(message, boardTasks, columns, members);
     if (result.action?.type === 'create' || result.action?.type === 'create_many') {
@@ -959,6 +1137,92 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
       result.reply = `Updated ${updated.length} tasks on the board.`;
     }
     res.json(result);
+  } catch (error) { next(error); }
+});
+
+// Home-page board generation. It reuses the same AI integration and task
+// validation as Copilot; the only new behaviour is creating the destination board
+// first and persisting the validated plan. Secrets stay on the server.
+app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
+  try {
+    const input = normalizeBoardGenerationRequest(req.body || {});
+    if (input.error) return res.status(400).json({ error: input.error });
+
+    if (!process.env.OPENROUTER_API_KEY?.trim()) {
+      return res.status(503).json({
+        error: 'AI board generation is not configured on this server. Add OPENROUTER_API_KEY to backend/.env and restart the API, or create a board manually.',
+        code: 'AI_NOT_CONFIGURED'
+      });
+    }
+
+    const ownerId = userId(req);
+    const members = [{
+      id: ownerId,
+      name: String(req.user.name || req.user.email),
+      email: String(req.user.email)
+    }];
+    const result = await chatWithContext(planningMessage(input.goal, input.name), [], BOARD_COLUMNS, members);
+    const plannedTasks = tasksFromAiResult(result);
+    if (!plannedTasks.length) {
+      return res.status(422).json({
+        error: 'The AI planner could not turn that goal into tasks. Describe the project and its main outcomes, or create a board manually.',
+        code: 'AI_NO_PLAN'
+      });
+    }
+
+    // Validate everything before creating the board, so bad AI output cannot
+    // leave an empty board behind.
+    for (const task of plannedTasks) {
+      validateTaskInput(task, false);
+      task.assignee = resolveBoardAssignee(task.assignee, members);
+    }
+
+    const { board, created } = await createBoardWithPlan({
+      boardData: {
+        ownerId,
+        memberIds: [ownerId],
+        name: input.name || boardNameFromGoal(input.goal)
+      },
+      tasks: plannedTasks,
+      createBoard: boardStore.create,
+      createTask: async (task) => {
+        let key;
+        do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+        return store.create({
+          key,
+          ownerId,
+          boardId: task.boardId,
+          title: String(task.title || '').trim(),
+          description: String(task.description || '').slice(0, 4000),
+          status: task.status || BACKLOG_STATUS,
+          priority: task.priority || 'medium',
+          labels: [...new Set(task.labels || [])],
+          assignee: task.assignee || 'Unassigned',
+          dueDate: String(task.dueDate || '').slice(0, 40),
+          sprintId: null,
+          storyPoints: Number.isInteger(task.storyPoints) ? task.storyPoints : 0,
+          comments: [],
+          attachments: [],
+          dependencies: []
+        });
+      },
+      deleteBoardTasks: async (id) => {
+        if (mongoReady) await Task.deleteMany({ boardId: id });
+        else memoryTasks = memoryTasks.filter((task) => String(task.boardId) !== id);
+      },
+      deleteBoard: (id) => boardStore.remove(id)
+    });
+
+    res.status(201).json({
+      board: { id: boardId(board), name: board.name, isOwner: true },
+      tasksCreated: created.length,
+      tasks: created.map((task) => ({
+        key: task.key,
+        title: task.title,
+        status: task.status,
+        priority: task.priority
+      }))
+    });
   } catch (error) { next(error); }
 });
 

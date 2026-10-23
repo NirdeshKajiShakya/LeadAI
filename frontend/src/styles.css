@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
  .auth-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 0, #25364d 0, transparent 50%), var(--bg); }
  .auth-panel { width: min(100%, 420px); padding: 40px; border: 1px solid var(--line); border-radius: 12px; background: rgba(20, 26, 34, .9); box-shadow: 0 24px 80px #0008; }
  .auth-panel .logo-mark { margin-bottom: 28px; }
