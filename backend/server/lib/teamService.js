@@ -16,6 +16,10 @@ import { EVENTS, emitEvent, isEventId } from './events.js';
 
 let databaseReady = false;
 export let memoryTeamMembers = [];
+// In-memory stores owned here so lookups and writes share one source of truth.
+export const memoryTeams = [];
+export const memorySprints = [];
+export const memoryTasks = [];
 
 export function setDatabaseReady(value) {
   databaseReady = value;
@@ -108,12 +112,12 @@ export async function findTeamForMembership(teamId) {
     }
     return team;
   }
-  const team = globalThis.__memoryTeams?.find((t) => String(t._id) === String(teamId));
+  const team = memoryTeams.find((t) => String(t._id) === String(teamId)) || memorySprints.find((s) => String(s._id) === String(teamId));
   if (!team) return undefined;
   return {
     ...team,
-    sprints: globalThis.__memorySprints?.filter((s) => String(s.teamId) === String(teamId)) || [],
-    tasks: globalThis.__memoryTasks?.filter((t) => String(t.teamId) === String(teamId)) || []
+    sprints: memorySprints.filter((s) => String(s.teamId) === String(teamId)) || [],
+    tasks: memoryTasks.filter((t) => String(t.teamId) === String(teamId)) || []
   };
 }
 

@@ -58,6 +58,7 @@ export function emitTaskAssigned({ task, previousAssigneeId, actorId, at }) {
     assigneeId,
     at
   });
+  console.log('[taskService] emitTaskAssigned emitted for task', task._id, 'assignee', assigneeId);
 }
 
 const IN_PROGRESS_STATUSES = new Set(['progress', 'review']);
@@ -172,6 +173,12 @@ export async function createTaskWithHistory({ data, actorId, teamId }) {
   // actor is present) have been persisted. If the history write above
   // throws, the whole operation fails and no success event is emitted.
   emitTaskCreated({ task, actorId, teamId: teamId ?? task.sprintId ?? null, at: now });
+
+  // A task born with an assignee counts as an initial assignment: notify
+  // the assignee (same contract as a later reassignment, just from null).
+  if (task.assigneeId && actorId) {
+    emitTaskAssigned({ task, previousAssigneeId: null, actorId, at: now });
+  }
 
   return { task, initialHistory };
 }

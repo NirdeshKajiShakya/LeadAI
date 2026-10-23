@@ -24,6 +24,7 @@
 
 import { EventEmitter } from 'node:events';
 import { ALLOWED_STATUSES } from './taskMigration.js';
+import mongoose from 'mongoose';
 
 // The single shared emitter for the whole application.
 const emitter = new EventEmitter();
@@ -189,7 +190,12 @@ export function emitEvent(eventName, payload) {
   // them directly so each one is individually isolated.
   for (const listener of emitter.rawListeners(eventName)) {
     try {
-      listener(frozenPayload);
+      const result = listener(frozenPayload);
+      if (result && typeof result.then === 'function') {
+        result.catch((error) => {
+          console.error(`[events] listener for "${eventName}" failed:`, error);
+        });
+      }
     } catch (error) {
       console.error(`[events] listener for "${eventName}" failed:`, error);
     }
@@ -228,114 +234,3 @@ export function listenerCount(eventName) {
   assertSupportedEvent(eventName);
   return emitter.listenerCount(eventName);
 }
-
-// ----- Notification subscribers -----
-
-import { notify } from './notificationService.js';
-import { User } from '../models/User.js';
-
-// Helper: get team admins who should receive membership notifications
-async function getTeamAdmins(teamId) {
-  const members = await mongoose.models.TeamMember.find({ teamId, role: 'admin' }).select('userId');
-  return members.map((m) => String(m.userId));
-}
-
-// TASK_ASSIGNED: notify the new assignee, but not when they assign it to themselves
-emitter.on(EVENTS.TASK_ASSIGNED, async (payload) => {
-  const { taskId, teamId, actorId, assigneeId } = payload;
-
-  // Skip if assigneeId is null/empty (unassigned)
-  if (!assigneeId) return;
-
-  // Don't notify if the assignee is the actor (self-assignment)
-  if (String(assigneeId) === String(actorId)) return;
-
-  // Look up the assignee's email/preferences, notify only the assignee
-  await notify({
-    userId: String(assigneeId),
-    type: 'task_assigned',
-    title: 'Task assigned',
-    body: `You have been assigned a new task`,
-    link: `/task/${taskId}`,
-    meta: { taskId, teamId, actorId }
-  });
-});
-
-// TASK_STATUS_CHANGED: notify the assignee and creator, excluding the actor
-emitter.on(EVENTS.TASK_STATUS_CHANGED, async (payload) => {
-  const { taskId, teamId, actorId, from, to } = payload;
-
-  // We need to find the task to get assigneeId and ownerId
-  const Task = mongoose.models.Task;
-  const task = await Task.findById(taskId).lean();
-  if (!task) return;
-
-  const recipients = new Set();
-
-  // Add assignee if they exist and are not the actor
-  if (task.assigneeId && String(task.assigneeId) !== String(actorId)) {
-    recipients.add(String(task.assigneeId));
-  }
-
-  // Add creator/owner if they exist and are not the actor
-  if (task.ownerId && String(task.ownerId) !== String(actorId)) {
-    recipients.add(String(task.ownerId));
-  }
-
-  for (const recipientId of recipients) {
-    await notify({
-      userId: recipientId,
-      type: 'task_status_changed',
-      title: 'Task status updated',
-      body: `Task status changed from "${from}" to "${to}"`,
-      link: `/task/${taskId}`,
-      meta: { taskId, teamId, actorId, from, to }
-    });
-  }
-});
-
-// MEMBER_JOINED: notify team admins (exclude the joining member)
-emitter.on(EVENTS.MEMBER_JOINED, async (payload) => {
-  const { teamId, memberId, actorId } = payload;
-
-  // Get team admins
-  const admins = await getTeamAdmins(teamId);
-
-  // Exclude the joining member
-  const adminIds = admins.filter((id) => String(id) !== String(memberId));
-
-  for (const adminId of adminIds) {
-    await notify({
-      userId: adminId,
-      type: 'member_joined',
-      title: 'Team member joined',
-      body: 'A new member has joined the team',
-      link: `/team/${teamId}`,
-      meta: { teamId, memberId, actorId }
-    });
-  }
-});
-
-// MEMBER_LEFT: notify team admins (exclude the leaving member)
-emitter.on(EVENTS.MEMBER_LEFT, async (payload) => {
-  const { teamId, memberId, actorId } = payload;
-
-  // Get team admins
-  const admins = await getTeamAdmins(teamId);
-
-  // Exclude the leaving member
-  const adminIds = admins.filter((id) => String(id) !== String(memberId));
-
-  for (const adminId of adminIds) {
-    await notify({
-      userId: adminId,
-      type: 'member_left',
-      title: 'Team member left',
-      body: 'A team member has left the team',
-      link: `/team/${teamId}`,
-      meta: { teamId, memberId, actorId }
-    });
-  }
-});
-
-export { getTeamAdmins };

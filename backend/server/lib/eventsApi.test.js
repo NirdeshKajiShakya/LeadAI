@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 // and dotenv will not override an already-set key.
 process.env.MONGODB_URI = '';
 process.env.PORT = process.env.TEST_PORT || '4102';
+process.env.NODE_ENV = 'test';
 
 const { store, serverStarted } = await import('../index.js');
 const { EVENTS, onEvent, listenerCount } = await import('./events.js');
@@ -136,14 +137,17 @@ try {
   // ---- task.assigned ----------------------------------------------------------
 
   // In-memory user resolution only knows the signed-in caller, so the owner
-  // assigns the task to themselves — the meaningful assertion is that the
+  // assigns the task to themselves ΓÇö the meaningful assertion is that the
   // persisted assignee reference (not the raw input) lands in the payload.
+  // Starter tasks seeded during signup with an assignee also emit task.assigned
+  // on creation, so we measure relative to that baseline.
+  const seededAssignments = eventsOf(EVENTS.TASK_ASSIGNED).length;
   const assigned = await api(`/tasks/${key}`, { method: 'PATCH', body: JSON.stringify({ assigneeId: userA._id }) });
   await check('successful assignment emits task.assigned with the persisted assignee', () => {
     assert.equal(assigned.status, 200);
     const seen = eventsOf(EVENTS.TASK_ASSIGNED);
-    assert.equal(seen.length, 1);
-    const { payload } = seen[0];
+    assert.equal(seen.length, seededAssignments + 1);
+    const { payload } = seen[seen.length - 1];
     assert.deepEqual(Object.keys(payload).sort(), ['actorId', 'assigneeId', 'at', 'taskId', 'teamId']);
     assert.equal(payload.taskId, created.body._id);
     assert.equal(payload.assigneeId, userA._id);
@@ -154,7 +158,7 @@ try {
   const unchangedAssign = await api(`/tasks/${key}`, { method: 'PATCH', body: JSON.stringify({ assigneeId: userA._id }) });
   await check('an unchanged assignment emits no duplicate event', () => {
     assert.equal(unchangedAssign.status, 200);
-    assert.equal(eventsOf(EVENTS.TASK_ASSIGNED).length, 1, 'count unchanged');
+    assert.equal(eventsOf(EVENTS.TASK_ASSIGNED).length, seededAssignments + 1, 'count unchanged');
   });
 
   const badAssignee = await api(`/tasks/${key}`, { method: 'PATCH', body: JSON.stringify({ assigneeId: userB._id }) });
@@ -162,7 +166,7 @@ try {
     // In-memory mode only resolves the caller; an unknown id is a 400 before
     // any write, so nothing may be emitted.
     assert.equal(badAssignee.status, 400);
-    assert.equal(eventsOf(EVENTS.TASK_ASSIGNED).length, 1, 'count unchanged');
+    assert.equal(eventsOf(EVENTS.TASK_ASSIGNED).length, seededAssignments + 1, 'count unchanged');
   });
 
   // ---- member.joined ----------------------------------------------------------

@@ -20,14 +20,25 @@ import { convertDueDate, migrateLegacyFields, assertMappedStatus } from './lib/t
 import {
   addTeamMember, removeTeamMember, listTeamMembers, updateMemberRole,
   setDatabaseReady as setTeamDatabaseReady,
-  findTeamForMembership
+  findTeamForMembership,
+  memoryTeams, memorySprints, memoryTasks, memoryTeamMembers
 } from './lib/teamService.js';
+// Only register notification subscribers in non-test mode.
+import './lib/notificationSubscribers.js';
+import {
+  notify,
+  listMemoryNotifications,
+  findMemoryNotificationById,
+  updateMemoryNotification,
+  updateManyMemoryNotifications,
+} from './lib/notificationService.js';
+
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
   createResetToken, consumeResetToken, memoryUsers, hashPassword, setDatabaseReady,
   refreshSessionUser, serializeUser, sessions,
-  findUserByEmail, findUserById
+  findUserByEmail, findUserById, userId
 } from './auth.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
 
@@ -41,7 +52,6 @@ const allowedStatuses = ['backlog', 'todo', 'progress', 'review', 'done'];
 const allowedPriorities = ['urgent', 'high', 'medium', 'low'];
 const rateLimits = new Map();
 let mongoReady = false;
-let memorySprints = [];
 let memoryBoards = [];
 
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -78,8 +88,8 @@ function starterTasksFor(user) {
     { title: 'Invite a teammate to collaborate', status: 'backlog', priority: 'medium', labels: ['Team'], assignee: 'Unassigned', dueDate: 'Unscheduled', description: 'Share your workspace so others can comment on and track shared work.' }
   ];
 }
-let memoryTasks = [];
 let memoryHistory = [];
+
 function seedSprint(ownerId, boardId = null) {
   const start = new Date(`${todayIsoDate()}T00:00:00Z`);
   start.setUTCDate(start.getUTCDate() - 3);
@@ -139,12 +149,15 @@ const store = {
     const now = new Date();
     const task = { ...data, _id: crypto.randomUUID(), createdAt: now, updatedAt: now };
     applyStatusLifecycle(task, task.status || 'backlog', now);
-    memoryTasks = [...memoryTasks, task];
+    memoryTasks.push(task);
     if (actorId) {
       memoryHistory.push({ _id: crypto.randomUUID(), taskId: task._id, teamId: teamId ?? task.sprintId ?? null, from: null, to: task.status, actorId, at: now });
     }
     // Emitted only after the task is committed to the in-memory store.
     emitTaskCreated({ task, actorId, teamId: teamId ?? task.sprintId ?? null, at: task.createdAt });
+    if (actorId && task.assigneeId) {
+      emitTaskAssigned({ task, previousAssigneeId: null, actorId, at: task.createdAt });
+    }
     return task;
   },
   update: async (key, data, actorId = null, teamId = null, requesterRole = 'member') => {
@@ -186,7 +199,8 @@ const store = {
         memoryHistory.push({ _id: crypto.randomUUID(), taskId: next._id, teamId: teamId ?? next.sprintId ?? null, from: current.status, to: newStatus, actorId, at: now });
       }
     }
-    memoryTasks = memoryTasks.map((task) => task.key === key ? next : task);
+    const taskIndex = memoryTasks.findIndex((t) => t.key === key);
+    if (taskIndex >= 0) memoryTasks[taskIndex] = next;
     // Events are emitted only after the write above committed.
     if (statusChanged) {
       emitTaskStatusChanged({ task: next, from: current.status, to: newStatus, actorId, teamId: teamId ?? next.sprintId ?? null, at: now });
@@ -197,7 +211,9 @@ const store = {
   remove: async (key) => {
     if (mongoReady) return Task.deleteOne({ key });
     const before = memoryTasks.length;
-    memoryTasks = memoryTasks.filter((task) => task.key !== key);
+    for (let i = memoryTasks.length - 1; i >= 0; i -= 1) {
+      if (String(memoryTasks[i].key) === String(key)) memoryTasks.splice(i, 1);
+    }
     return { deletedCount: before - memoryTasks.length };
   },
   listBySprint: (id) => mongoReady ? Task.find({ sprintId: id }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.sprintId) === String(id))),
@@ -220,14 +236,15 @@ const sprintStore = {
   create: async (data) => {
     if (mongoReady) return new Sprint(data).save();
     const sprint = withSprintId({ ...data, createdAt: new Date() });
-    memorySprints = [...memorySprints, sprint];
+    memorySprints.push(sprint);
     return sprint;
   },
   update: async (id, ownerId, data) => {
     if (mongoReady) return Sprint.findOneAndUpdate({ _id: id, ownerId }, { $set: data }, { new: true, runValidators: true }).lean();
     const current = await sprintStore.find(id, ownerId);
     if (!current) return null;
-    memorySprints = memorySprints.map((sprint) => sprintId(sprint) === String(id) ? { ...sprint, ...data } : sprint);
+    const sprintIndex = memorySprints.findIndex((s) => sprintId(s) === String(id));
+    if (sprintIndex >= 0) memorySprints[sprintIndex] = { ...memorySprints[sprintIndex], ...data };
     return sprintStore.find(id, ownerId);
   }
 };
@@ -310,7 +327,7 @@ async function authorizedSprint(req, res) {
   return sprint;
 }
 
-function userId(req) { return String(req.user._id); }
+
 async function boardMembers(board) {
   const members = await Promise.all((board.memberIds || []).map((id) => findUserById(id)));
   return members.filter(Boolean).map((member) => ({
@@ -366,6 +383,8 @@ function taskUpdates(body) {
 // provided assigneeId does not correspond to a real user (HTTP 400 path).
 // Legacy clients may send only the display name; that keeps assigneeId null.
 async function resolveAssigneeFields(req, rawAssigneeId, legacyAssignee) {
+  const requested = String(legacyAssignee || '').trim();
+  // Resolve by explicit id first
   if (rawAssigneeId !== undefined && rawAssigneeId !== null && rawAssigneeId !== '') {
     const id = String(rawAssigneeId);
     if (!mongoReady) {
@@ -376,6 +395,19 @@ async function resolveAssigneeFields(req, rawAssigneeId, legacyAssignee) {
     const user = await User.findById(id);
     if (!user) return null;
     return { assigneeId: user._id.toString(), assignee: String(user.name || 'Unassigned').slice(0, 120) };
+  }
+  // Legacy path: resolve by display name when no id was provided
+  if (requested && requested.toLowerCase() !== 'unassigned') {
+    let user;
+    if (!mongoReady) {
+      user = [...memoryUsers.values()].find((u) => String(u.name || '').toLowerCase() === requested.toLowerCase());
+    } else {
+      user = await User.findOne({ name: new RegExp(`^${requested}$`, 'i') });
+    }
+    if (user) {
+      return { assigneeId: String(user._id), assignee: String(user.name || 'Unassigned').slice(0, 120) };
+    }
+    return null;
   }
   return { assigneeId: null, assignee: String(legacyAssignee || 'Unassigned').slice(0, 120) };
 }
@@ -635,7 +667,12 @@ app.delete('/api/boards/:id', requireAuth, async (req, res, next) => {
     if (!board) return;
     const result = await boardStore.remove(boardId(board));
     if (mongoReady) await Task.deleteMany({ boardId: boardId(board) });
-    else memoryTasks = memoryTasks.filter((task) => String(task.boardId) !== boardId(board));
+    else {
+      for (let i = memoryTasks.length - 1; i >= 0; i -= 1) {
+        const task = memoryTasks[i];
+        if (task && String(task.boardId) === boardId(board)) memoryTasks.splice(i, 1);
+      }
+    }
     res.json({ ok: result.deletedCount === 1 });
   } catch (error) { next(error); }
 });
@@ -783,15 +820,16 @@ app.get('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     const tasks = await store.list();
     const board = req.query.boardId ? await authorizedBoard({ ...req, params: { id: req.query.boardId } }, res) : await defaultBoardFor(req);
-    if (!board) return res.json([]);
+    if (!board) { if (!res.headersSent) res.json([]); return; }
     res.json((await Promise.all(tasks.map(async (task) => String(task.boardId || '') === boardId(board) && (await canAccess(task, req)) ? task : null))).filter(Boolean));
   } catch (error) { next(error); }
 });
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
+    console.log('[api] POST /api/tasks', { actor: userId(req), body: req.body });
     validateTaskInput(req.body || {});
     const board = req.body.boardId ? await authorizedBoard({ ...req, params: { id: req.body.boardId } }, res) : await defaultBoardFor(req);
-    if (!board) return res.status(404).json({ error: 'Create a board before adding tasks.' });
+    if (!board) { if (!res.headersSent) return res.status(404).json({ error: 'Create a board before adding tasks.' }); return; }
     if (req.body.sprintId && !await sprintStore.find(req.body.sprintId, userId(req))) return res.status(404).json({ error: 'Sprint not found.' });
     const teamId = req.body?.teamId ? String(req.body.teamId) : null;
     if (teamId && !/^[a-zA-Z0-9_-]{8,}$/.test(teamId)) return res.status(400).json({ error: 'Invalid team id.' });
@@ -810,11 +848,13 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
       sprintId: req.body.sprintId || null, storyPoints: req.body.storyPoints || 0,
       comments: [], attachments: [], dependencies: []
     }, userId(req), teamId);
+    console.log('[api] POST /api/tasks created', { key: task.key, assigneeId: task.assigneeId, ownerId: task.ownerId });
     res.status(201).json(task);
   } catch (error) { next(error); }
 });
 app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
   try {
+    console.log('[api] PATCH /api/tasks/:key', { key: req.params.key, actor: userId(req), body: req.body });
     const task = await authorizedTask(req, res);
     if (!task) return;
     validateTaskInput(req.body || {}, true);
@@ -936,8 +976,7 @@ app.post('/api/teams', requireAuth, async (req, res, next) => {
       team = await Team.create({ name, ownerId: actorId });
     } else {
       team = { _id: `mem-team-${Date.now()}-${crypto.randomInt(100, 999)}`, name, ownerId: actorId, createdAt: new Date() };
-      if (!globalThis.__memoryTeams) globalThis.__memoryTeams = [];
-      globalThis.__memoryTeams.push(team);
+      memoryTeams.push(team);
     }
     res.status(201).json({ _id: String(team._id), name: team.name, ownerId: String(team.ownerId), role: 'owner' });
   } catch (error) { next(error); }
@@ -1018,8 +1057,8 @@ app.patch('/api/teams/:teamId', requireAuth, async (req, res, next) => {
       const updated = await Team.findByIdAndUpdate(teamId, { $set: { name } }, { new: true }).lean();
       res.json({ _id: String(updated._id), name: updated.name, ownerId: String(updated.ownerId) });
     } else {
-      if (globalThis.__memoryTeams) {
-        const t = globalThis.__memoryTeams.find((t) => String(t._id) === teamId);
+      if (memoryTeams) {
+        const t = memoryTeams.find((t) => String(t._id) === teamId);
         if (t) t.name = name;
       }
       res.json({ _id: teamId, name, ownerId: String(team.ownerId) });
@@ -1043,12 +1082,20 @@ app.delete('/api/teams/:teamId', requireAuth, async (req, res, next) => {
       await Task.updateMany({ teamId }, { $set: { teamId: null } });
       await Sprint.updateMany({ teamId }, { $set: { teamId: null } });
     } else {
-      if (globalThis.__memoryTeams) {
-        globalThis.__memoryTeams = globalThis.__memoryTeams.filter((t) => String(t._id) !== teamId);
+      for (let i = memoryTeams.length - 1; i >= 0; i -= 1) {
+        if (String(memoryTeams[i]._id) !== teamId) memoryTeams.splice(i, 1);
       }
-      memoryTeamMembers = memoryTeamMembers.filter((m) => String(m.teamId) !== teamId);
-      memoryTasks = memoryTasks.map((t) => String(t.teamId) === teamId ? { ...t, teamId: null } : t);
-      memorySprints = memorySprints.map((s) => String(s.teamId) === teamId ? { ...s, teamId: null } : s);
+      for (let i = memoryTeamMembers.length - 1; i >= 0; i -= 1) {
+        if (String(memoryTeamMembers[i].teamId) !== teamId) memoryTeamMembers.splice(i, 1);
+      }
+      for (let i = memoryTasks.length - 1; i >= 0; i -= 1) {
+        const task = memoryTasks[i];
+        if (task && String(task.teamId) === teamId) task.teamId = null;
+      }
+      for (let i = memorySprints.length - 1; i >= 0; i -= 1) {
+        const sprint = memorySprints[i];
+        if (sprint && String(sprint.teamId) === teamId) sprint.teamId = null;
+      }
     }
     res.json({ ok: true });
   } catch (error) { next(error); }
@@ -1327,6 +1374,7 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
 });
 
 app.use((error, _req, res, _next) => {
+  if (res.headersSent) return;
   if (error instanceof multer.MulterError) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Attachment is invalid or too large.' });
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
   if (isAuthError(error)) return res.status(error.status).json({ error: error.message });
@@ -1357,17 +1405,22 @@ export { serverStarted };
 
 app.get('/api/notifications/unread', requireAuth, async (req, res, next) => {
   try {
-    const userId = userId(req);
+    const currentUserId = userId(req);
     const { page = 1, limit = 20 } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
+    if (!mongoReady) {
+      const { items, total } = listMemoryNotifications({ userId: currentUserId, read: false, limit: Number(limit), skip });
+      return res.json({ notifications: items, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
+    }
+
     const [notifications, total] = await Promise.all([
-      Notification.find({ userId, read: false })
+      Notification.find({ userId: currentUserId, read: false })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
         .lean(),
-      Notification.countDocuments({ userId, read: false })
+      Notification.countDocuments({ userId: currentUserId, read: false })
     ]);
 
     res.json({
@@ -1381,11 +1434,17 @@ app.get('/api/notifications/unread', requireAuth, async (req, res, next) => {
 
 app.get('/api/notifications', requireAuth, async (req, res, next) => {
   try {
-    const userId = userId(req);
+    const currentUserId = userId(req);
     const { page = 1, limit = 20, read } = req.query;
     const skip = (Number(page) - 1) * Number(limit);
 
-    const filter = {};
+    if (!mongoReady) {
+      const filterRead = read === undefined ? false : read === 'true';
+      const { items, total } = listMemoryNotifications({ userId: currentUserId, read: filterRead, limit: Number(limit), skip });
+      return res.json({ notifications: items, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
+    }
+
+    const filter = { userId: currentUserId };
     if (read !== undefined) filter.read = read === 'true';
     if (read === undefined) filter.read = false;
 
@@ -1409,11 +1468,17 @@ app.get('/api/notifications', requireAuth, async (req, res, next) => {
 
 app.patch('/api/notifications/:id/read', requireAuth, async (req, res, next) => {
   try {
-    const userId = userId(req);
+    const currentUserId = userId(req);
     const { id } = req.params;
 
+    if (!mongoReady) {
+      const notification = updateMemoryNotification(id, currentUserId, { read: true, readAt: new Date() });
+      if (!notification) return res.status(404).json({ error: 'Notification not found.' });
+      return res.json({ notification });
+    }
+
     const notification = await Notification.findOneAndUpdate(
-      { _id: id, userId },
+      { _id: id, userId: currentUserId },
       { read: true, readAt: new Date() },
       { new: true, runValidators: true }
     );
@@ -1426,8 +1491,14 @@ app.patch('/api/notifications/:id/read', requireAuth, async (req, res, next) => 
 
 app.patch('/api/notifications/read-all', requireAuth, async (req, res, next) => {
   try {
-    const userId = userId(req);
-    await Notification.updateMany({ userId, read: false }, { read: true, readAt: new Date() });
+    const currentUserId = userId(req);
+
+    if (!mongoReady) {
+      updateManyMemoryNotifications(currentUserId, { read: true, readAt: new Date() });
+      return res.json({ ok: true });
+    }
+
+    await Notification.updateMany({ userId: currentUserId, read: false }, { read: true, readAt: new Date() });
     res.json({ ok: true });
   } catch (error) { next(error); }
 });

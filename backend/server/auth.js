@@ -52,6 +52,10 @@ export function serializeUser(user) {
   return value;
 }
 
+export function userId(req) {
+  return req.user ? String(req.user._id) : null;
+}
+
 export async function findUserByEmail(email) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) return null;

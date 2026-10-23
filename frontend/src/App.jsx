@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Activity, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
+  Activity, ArrowRight, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
   Sparkles, Target,UserRound, Users, X, Zap
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
+import BellNotifications from './components/notifications/BellNotifications';
 
 const columns = [
   { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
@@ -79,7 +80,8 @@ function App() {
         setToken(null);
         return [];
       }
-      return response.json();
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
     }).then(setTasks).catch(() => setTasks([])).finally(() => setLoading(false));
     return () => window.removeEventListener('popstate', handlePopState);
   }, [token]);
@@ -88,7 +90,11 @@ function App() {
     if (!token || !activeBoardId) return;
     fetch(`${API_BASE_URL}/api/tasks?boardId=${encodeURIComponent(activeBoardId)}`, {
       headers: { Authorization: `Bearer ${token}` }
-    }).then((response) => response.json()).then(setTasks).catch(() => setTasks([]));
+    }).then(async (response) => {
+      if (!response.ok) return [];
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    }).then(setTasks).catch(() => setTasks([]));
   }, [token, activeBoardId]);
 
   useEffect(() => {
@@ -141,16 +147,19 @@ function App() {
     setPathname(path);
   }
 
-  const labels = useMemo(() => [...new Set(tasks.flatMap((task) => task.labels))].slice(0, 5), [tasks]);
+  const labels = useMemo(() => {
+    if (!Array.isArray(tasks)) return [];
+    return [...new Set(tasks.flatMap((task) => task.labels))].slice(0, 5);
+  }, [tasks]);
   const filteredTasks = useMemo(() => tasks.filter((task) => {
     const matchesQuery = `${task.key} ${task.title} ${task.description} ${task.assignee}`.toLowerCase().includes(query.toLowerCase());
     const matchesPriority = priority === 'all' || task.priority === priority;
     const matchesLabel = activeLabel === 'All' || task.labels.includes(activeLabel);
     return matchesQuery && matchesPriority && matchesLabel;
   }), [tasks, query, priority, activeLabel]);
-  const completed = tasks.filter((task) => task.status === 'done').length;
-  const inFlight = tasks.filter((task) => task.status === 'progress').length;
-  const completionRate = tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
+  const completed = Array.isArray(tasks) ? tasks.filter((task) => task.status === 'done').length : 0;
+  const inFlight = Array.isArray(tasks) ? tasks.filter((task) => task.status === 'progress').length : 0;
+  const completionRate = Array.isArray(tasks) && tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
   const workspaceName = user?.name ? `${user.name}'s workspace` : 'My workspace';
 
   function updateProfileUser(profile) {
@@ -313,7 +322,7 @@ function App() {
       <div className="board-breadcrumb" aria-label="Board location"><span>Workspace</span><b>/</b><span>Projects</span><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{boards.find((board) => board.id === activeBoardId)?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></div>
       <div className="topbar-actions">
         <label className="global-search"><Search size={15} /><input placeholder="Search tasks, comments, agents..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-        <IconButton label="Notifications"><Bell size={16} /></IconButton>        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
+        <BellNotifications />        <button className="text-button" onClick={async () => { await fetch(`${API_BASE_URL}/api/auth/signout`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }); sessionStorage.removeItem('leadai-session'); setToken(null); setUser(null); }}>Sign Out</button><button className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
       </div>
     </header>
     <div className="workspace-layout">
@@ -453,3 +462,4 @@ function TaskModal({ status, task, onClose, onSubmit, assignees }) {
 }
 
 export default App;
+
