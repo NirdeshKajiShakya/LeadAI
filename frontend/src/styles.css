@@ -522,6 +522,68 @@ h1 span { font: 500 10px 'DM Sans'; color: #929dad; background: var(--surface-3)
   .spin { animation: none; }
 }
 
+/* ===== Notifications bell dropdown ===== */
+.n-bell-wrap { position: relative; display: inline-block; }
+.n-bell-btn { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: transparent; color: #aeb9c5; position: relative; }
+.n-bell-btn:hover { color: #f0f3f8; background: #1c2630; }
+.n-bell-icon { width: 16px; height: 16px; }
+.n-unread-badge { position: absolute; top: 6px; right: 6px; width: 10px; height: 10px; background: var(--danger); border-radius: 50%; border: 1.5px solid #10161d; font: 700 7px 'DM Sans'; color: #fff; display: flex; align-items: center; justify-content: center; }
+
+.n-dropdown { position: absolute; top: 44px; right: -4px; width: 340px; background: #141a22; border: 1px solid #27313d; border-radius: 10px; box-shadow: 0 20px 60px #000a; z-index: 40; overflow: hidden; animation: n-fadeIn .18s ease; }
+@keyframes n-fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+
+.n-dropdown-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #202a34; background: #121820; }
+.n-dropdown-title { color: #f0f3f8; font-weight: 700; font-size: 13px; letter-spacing: -.01em; }
+.n-close-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 5px; background: transparent; color: #84909f; }
+.n-close-btn:hover { color: #f0f3f8; background: #1c2630; }
+
+.n-empty { display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 30px 14px; text-align: center; }
+.n-empty-icon { width: 40px; height: 40px; display: grid; place-items: center; color: #6c7786; background: #1c2630; border-radius: 10px; }
+.n-empty-icon svg { width: 22px; height: 22px; }
+.n-empty-text { color: #dfe5ee; font-size: 13px; font-weight: 600; margin: 0; }
+.n-empty-sub { color: #84909f; font-size: 11px; line-height: 1.5; margin: 0; max-width: 260px; }
+
+.n-list { max-height: 420px; overflow-y: auto; }
+.n-item { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid #1e2833; cursor: pointer; transition: background .15s; }
+.n-item:hover { background: #1c2630; }
+.n-item.n-unread { background: #16212d; }
+.n-item-left { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; background: #1c2630; flex: 0 0 auto; }
+.n-item-right { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.n-item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.n-item-title { color: #dfe5ee; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.n-item-time { color: #84909f; font-size: 10px; white-space: nowrap; flex: 0 0 auto; }
+.n-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); flex: 0 0 auto; }
+.n-item-body { color: #aeb9c5; font-size: 11px; line-height: 1.45; white-space: pre-wrap; margin: 0; }
+.n-item-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; color: var(--cyan); font-size: 10.5px; text-decoration: none; }
+.n-item-link:hover { text-decoration: underline; }
+.n-item-link svg { width: 12px; height: 12px; flex: 0 0 auto; }
+
+.n-footer { padding: 10px 14px; border-top: 1px solid #202a34; background: #121820; }
+.n-mark-all { display: inline-flex; align-items: center; gap: 6px; width: 100%; padding: 8px 12px; border-radius: 6px; background: transparent; color: #cbd4df; font-size: 12px; font-weight: 600; text-align: left; }
+.n-mark-all:hover { background: #1c2630; color: #f0f3f8; }
+
+/* Type indicator dot colors */
+.n-type-dot { width: 16px; height: 16px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; }
+.n-type-dot.assigned { background: #123344; color: var(--cyan); }
+.n-type-dot.status { background: #242140; color: #c7c3ff; }
+.n-type-dot.joined { background: #123326; color: var(--green); }
+.n-type-dot.left { background: #2d1c1f; color: #ffaaa4; }
+.n-type-dot.due { background: #48282f; color: var(--danger); }
+.n-type-dot.default { background: #1c2630; color: #84909f; }
+
+/* Make the bell fit nicely next to the search in topbar */
+.topbar-actions { gap: 12px; }
+.n-bell-wrap { margin-left: 2px; }
+
+@media (max-width: 800px) {
+  .n-dropdown { right: -8px; width: 300px; }
+  .topbar-actions { gap: 8px; }
+}
+@media (max-width: 520px) {
+  .n-dropdown { right: -10px; width: 280px; }
+}
+
+
 /* =====================================================================
    PART 5 - NEW: Kanban board (layout, columns, cards, board header)
    ===================================================================== */

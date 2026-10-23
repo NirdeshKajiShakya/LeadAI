@@ -32,10 +32,19 @@ const taskSchema = new mongoose.Schema({
   priority: { type: String, enum: ['urgent', 'high', 'medium', 'low'], default: 'medium' },
   labels: { type: [String], default: [] },
   assignee: { type: String, default: 'Unassigned', maxlength: 120 },
-  dueDate: { type: String, default: '', maxlength: 40 },
+  assigneeId: { type: String, default: null, index: true },
+  // Legacy free-text values ("Unscheduled", "Today", "Oct 18", ...) are
+  // converted to a real date by lib/taskMigration.convertDueDate; null means
+  // the task is unscheduled.
+  dueDate: { type: Date, default: null },
+  estimateHours: { type: Number, default: 0, min: 0, max: 1000 },
   aiSuggested: { type: Boolean, default: false },
   sprintId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sprint', default: null },
+  // The team this task belongs to. Tasks created outside a team have null.
+  teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null, index: true },
   storyPoints: { type: Number, default: 0, min: 0, max: 100 },
+  startedAt: { type: Date, default: null },
+  completedAt: { type: Date, default: null },
   comments: { type: [commentSchema], default: [] },
   attachments: { type: [attachmentSchema], default: [] },
   dependencies: { type: [dependencySchema], default: [] }

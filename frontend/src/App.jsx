@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
+import BellNotifications from './components/notifications/BellNotifications';
 import Dashboard from './Dashboard.jsx';
 import { isCalendarDate } from './sprintDates.js';
 import SettingsPage from './SettingsPage.jsx';
@@ -94,7 +95,8 @@ function App() {
         setToken(null);
         return [];
       }
-      return response.json();
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
     }).then(setTasks).catch(() => setTasks([])).finally(() => setLoading(false));
     return () => window.removeEventListener('popstate', handlePopState);
   }, [token]);
@@ -103,7 +105,11 @@ function App() {
     if (!token || !activeBoardId) return;
     fetch(`${API_BASE_URL}/api/tasks?boardId=${encodeURIComponent(activeBoardId)}`, {
       headers: { Authorization: `Bearer ${token}` }
-    }).then((response) => response.json()).then(setTasks).catch(() => setTasks([]));
+    }).then(async (response) => {
+      if (!response.ok) return [];
+      const data = await response.json();
+      return Array.isArray(data) ? data : [];
+    }).then(setTasks).catch(() => setTasks([]));
   }, [token, activeBoardId]);
 
   useEffect(() => {
@@ -244,9 +250,9 @@ function App() {
     const matchesLabel = activeLabel === 'All' || task.labels.includes(activeLabel);
     return matchesQuery && matchesPriority && matchesLabel;
   }), [tasks, query, priority, activeLabel]);
-  const completed = tasks.filter((task) => task.status === 'done').length;
-  const inFlight = tasks.filter((task) => task.status === 'progress').length;
-  const completionRate = tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
+  const completed = Array.isArray(tasks) ? tasks.filter((task) => task.status === 'done').length : 0;
+  const inFlight = Array.isArray(tasks) ? tasks.filter((task) => task.status === 'progress').length : 0;
+  const completionRate = Array.isArray(tasks) && tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
   const workspaceName = user?.name ? `${user.name}'s workspace` : 'My workspace';
   const isHome = pathname === '/';
   const activeBoard = boards.find((board) => board.id === activeBoardId) || null;
@@ -285,7 +291,8 @@ function App() {
   async function createTask(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assignee: form.get('assignee') || 'Unassigned', dueDate: form.get('dueDate') || '', boardId: activeBoardId };
+    const estimate = Number(form.get('estimateHours'));
+    const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assigneeId: form.get('assigneeId') || null, assignee: form.get('assignee') || null, dueDate: form.get('dueDate') || null, boardId: activeBoardId, estimateHours: Number.isFinite(estimate) ? estimate : 0 };
     const response = await fetch(`${API_BASE_URL}/api/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
     const task = await response.json();
     if (!response.ok) return setAuthError(task.error || 'Could not create task.');
@@ -308,14 +315,18 @@ function App() {
   async function saveTask(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const estimate = Number(form.get('estimateHours'));
     const payload = {
       title: form.get('title'),
       description: form.get('description'),
       status: modalStatus,
       priority: form.get('priority'),
       labels: [form.get('label') || 'General'],
-      assignee: form.get('assignee') || 'Unassigned',
-      dueDate: form.get('dueDate') || ''
+      assigneeId: form.get('assigneeId') || null,
+      assignee: form.get('assignee') || null,
+      dueDate: form.get('dueDate') || null,
+      boardId: activeBoardId,
+      estimateHours: Number.isFinite(estimate) ? estimate : 0
     };
     const response = await fetch(`${API_BASE_URL}/api/tasks/${editingTask.key}`, {
       method: 'PATCH',
@@ -524,6 +535,13 @@ function AuthScreen({ mode, setMode, error, busy, onSubmit }) {
 }
 function Metric({ label, value, dot, icon }) { return <div className="metric"><span>{dot && <i className={`metric-dot ${dot}`}></i>}{icon}{label}</span><strong>{value}</strong></div>; }
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove, onEdit, onDelete }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
+function formatDue(value) {
+  if (!value) return 'Unscheduled';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><span className="assignee"><i>{initialsOf(task.assignee)}</i>{task.assignee}</span><span className="task-meta"><CalendarDays size={13} />{task.dueDate || 'No due date'}</span><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></article>; }
 function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><div className="task-footer-details"><span className="assignee"><i>{initialsOf(task.assignee)}</i><b>{task.assignee}</b></span><span className="task-meta"><CalendarDays size={13} />{task.dueDate || 'No due date'}</span></div><div className="task-footer-actions"><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></div></article>; }
 function TaskList({ tasks, onMove, onEdit, onDelete }) { return <div className="task-table"><div className="task-table-head"><span>Task</span><span>Status</span><span>Priority</span><span>Assignee</span><span>Due</span><span>Actions</span></div>{tasks.length ? tasks.map((task) => <div className="task-table-row" key={task.key}><div><strong>#{task.key}</strong><span>{task.title}</span></div><select aria-label={`Status for ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span><span>{task.assignee}</span><span>{task.dueDate}</span><span className="row-actions"><button type="button" onClick={() => onEdit(task)}>Edit</button><button type="button" onClick={() => onDelete(task)}>Delete</button></span></div>) : <div className="empty-column">No tasks match the current filters.</div>}</div>; }
 function BoardEmptyState({ onCreate, onManage }) {
@@ -695,3 +713,4 @@ function TaskModal({ status, task, onClose, onSubmit, assignees }) {
 }
 
 export default App;
+
