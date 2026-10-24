@@ -309,9 +309,9 @@ async function assignedOpenTaskCounts(accessibleIds, names, today) {
     const openQuery = { boardId: { $in: accessibleIds }, assignee: { $in: names }, status: { $ne: 'done' } };
     const [open, overdue] = await Promise.all([
       Task.countDocuments(openQuery),
-      // Free-text due dates ("This week") are deliberately excluded; only a real
-      // calendar date can be compared with today.
-      Task.countDocuments({ ...openQuery, dueDate: { $regex: /^\d{4}-\d{2}-\d{2}$/, $lt: today } })
+      // dueDate is stored as a Date. Comparing it directly excludes null values
+      // and avoids applying string operators to MongoDB date fields.
+      Task.countDocuments({ ...openQuery, dueDate: { $lt: today } })
     ]);
     return { open, overdue };
   }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
+  ChevronLeft, ChevronRight,
   Sparkles, Target, UserRound, Users, X, Zap, LoaderCircle, Clock3, Mail, Shield, Trash2
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
@@ -58,6 +59,7 @@ function App() {
   ]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dashboardRefresh, setDashboardRefresh] = useState(0);
   const [pendingTask, setPendingTask] = useState(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -491,11 +493,13 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
       </div>
     </header>
     <div className="workspace-layout">
-      <aside className="sidebar">
-        <div className="mobile-menu"><Menu size={18} /></div>
+      <aside className="sidebar" data-collapsed={sidebarCollapsed} aria-expanded={!sidebarCollapsed}>
+        <button className="sidebar-collapse" aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((prev) => !prev)}>
+          {sidebarCollapsed ? <Menu size={18} /> : <Menu size={18} />}
+        </button>
         <div className="nav-section"><div className="nav-label">Workspace</div><NavItem active={pathname === '/'} onClick={() => navigate('/')} icon={<LayoutGrid size={15} />} label="Home" /><NavItem active={pathname === '/board'} onClick={() => navigate('/board')} icon={<Target size={15} />} label="Kanban Board" badge="Live" /><NavItem active={pathname === '/backlog'} onClick={() => navigate('/backlog')} icon={<List size={15} />} label="Sprint Backlog" /></div>
         <div className="nav-section"><div className="nav-label">Operations</div><NavItem active={pathname === '/automations'} onClick={() => navigate('/automations')} icon={<Sparkles size={15} />} label="Automations" /><NavItem active={pathname === '/team'} onClick={() => navigate('/team')} icon={<Users size={15} />} label="Team & Workspace" /><NavItem active={pathname === '/settings'} onClick={() => navigate('/settings')} icon={<Settings2 size={15} />} label="Settings" /><NavItem active={pathname === '/profile' || pathname === '/profile/edit'} onClick={() => navigate('/profile')} icon={<UserRound size={15} />} label="Profile" /></div>
-        <div className="sidebar-footer"><div className="quota-card"><div className="quota-copy"><span>{shellProgressLabel}</span><strong>{shellProgress}%</strong></div><div className="quota-bar" role="progressbar" aria-label={shellProgressLabel} aria-valuemin={0} aria-valuemax={100} aria-valuenow={shellProgress}><span style={{ width: `${shellProgress}%` }} /></div></div><div className={`ai-active ${aiConfigured === false ? 'is-offline' : ''}`}><span></span>{aiConfigured === false ? 'AI Copilot Offline' : aiConfigured ? 'AI Copilot Active' : 'AI Copilot'}<Zap size={14} /></div></div>
+        {!sidebarCollapsed && <div className="sidebar-footer"><div className="quota-card"><div className="quota-copy"><span>{shellProgressLabel}</span><strong>{shellProgress}%</strong></div><div className="quota-bar" role="progressbar" aria-label={shellProgressLabel} aria-valuemin={0} aria-valuemax={100} aria-valuenow={shellProgress}><span style={{ width: `${shellProgress}%` }} /></div></div><div className={`ai-active ${aiConfigured === false ? 'is-offline' : ''}`}><span></span>{aiConfigured === false ? 'AI Copilot Offline' : aiConfigured ? 'AI Copilot Active' : 'AI Copilot'}<Zap size={14} /></div></div>}
       </aside>
       <main className="main-content">
         {authError && <div className="form-error" role="alert">{authError}<button type="button" onClick={() => setAuthError('')} aria-label="Dismiss error"><X size={13} /></button></div>}
@@ -528,7 +532,7 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
   </div>;
 }
 
-function NavItem({ icon, label, active, badge, onClick }) { return <button className={`nav-item ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span>{badge && <em>{badge}</em>}</button>; }
+function NavItem({ icon, label, active, badge, onClick }) { return <button className={`nav-item ${active ? 'active' : ''}`} title={label} aria-label={label} onClick={onClick}>{icon}<span>{label}</span>{badge && <em>{badge}</em>}</button>; }
 function AuthScreen({ mode, setMode, error, busy, onSubmit }) {
   const signup = mode === 'signup';
   return <main className="auth-screen"><div className="auth-panel"><div className="logo-mark"><span></span><span></span><span></span></div><div className="eyebrow">LeadAI workspace</div><h1>{signup ? 'Create your account' : 'Welcome back'}</h1><p>{signup ? 'Start shaping clearer work for your team.' : 'Sign in to continue to your sprint board.'}</p><form onSubmit={onSubmit}>{signup && <label>Name<input name="name" autoComplete="name" maxLength="80" /></label>}<label>Email<input name="email" type="email" autoComplete="email" required /></label><label>Password<input name="password" type="password" minLength="8" maxLength="128" autoComplete={signup ? 'new-password' : 'current-password'} required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button" type="submit" disabled={busy}>{busy ? 'Working...' : signup ? 'Create account' : 'Sign in'} {!busy && <ArrowRight size={15} />}</button></form><button className="auth-switch" onClick={() => setMode(signup ? 'signin' : 'signup')} disabled={busy}>{signup ? 'Already have an account? Sign in' : 'Need an account? Sign up'}</button></div></main>;
