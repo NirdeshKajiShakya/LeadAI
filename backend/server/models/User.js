@@ -14,6 +14,9 @@ const userSchema = new mongoose.Schema({
   // Technical skills the member has listed on their profile (e.g. ["React", "Python", "Docker"]).
   // Used by the Copilot to suggest task assignments. Optional; defaults to an empty array.
   skills: { type: [String], default: [], trim: true },
+  // Optional personal OpenRouter key. Used only when the server has no key of
+  // its own. select:false keeps it out of ordinary queries, like passwordHash.
+  openrouterApiKey: { type: String, trim: true, maxlength: 256, default: '', select: false },
   // Small inline image (data URL, <= 80 KB decoded). Avoids a public upload directory
   // and keeps avatars in the shared database instead of one developer's disk.
   avatar: { type: String, default: '', maxlength: 110_000 },
@@ -23,8 +26,18 @@ const userSchema = new mongoose.Schema({
     default: 'member'
   },
   authSessions: [{ type: String }],
-  resetToken: { type: String },
-  resetTokenExpiresAt: { type: Date }
+  // New accounts start unverified and only receive a board once the emailed
+  // code is confirmed. Older accounts have no field and hydrate as true.
+  emailVerified: { type: Boolean, default: true },
+  // Browsers that already passed the emailed sign-in check. Only a hash of the
+  // browser's device id is stored (see auth.js).
+  trustedDevices: [{
+    _id: false,
+    deviceHash: { type: String, required: true },
+    label: { type: String, default: '', maxlength: 120 },
+    trustedAt: { type: Date, default: Date.now },
+    lastSeenAt: { type: Date, default: Date.now }
+  }]
 }, { timestamps: true });
 
 export const User = mongoose.model('User', userSchema);

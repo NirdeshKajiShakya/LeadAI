@@ -117,7 +117,7 @@ async function seed() {
     try {
       const result = await Task.updateOne(
         { key },
-        { $setOnInsert: { key, ownerId, sprintId: sprint._id, comments: [], attachments: [], dependencies: [], dueDate: 'Unscheduled', assignee: user.name || 'Unassigned', ...template } },
+        { $setOnInsert: { key, ownerId, sprintId: sprint._id, comments: [], attachments: [], dependencies: [], dueDate: null, assignee: user.name || 'Unassigned', ...template } },
         { upsert: true, timestamps: false }
       );
       if (result.upsertedCount) created += 1;

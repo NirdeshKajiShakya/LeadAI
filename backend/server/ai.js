@@ -190,12 +190,15 @@ function fallbackReply(message, tasks, columns, members = []) {
   return emptyResult('I can help you create, move, and update tasks, brainstorm ideas, or answer questions about this board. Try “create a task called…”, “move KAN-123 to done”, or ask about a task.');
 }
 
-async function chatWithContext(userMessage, tasks, columns, members = []) {
+// options.userApiKey: the requesting member's personal OpenRouter key. It is
+// used only when the server has no key of its own, so a workspace-wide key
+// always wins and members without one simply keep the offline fallback.
+async function chatWithContext(userMessage, tasks, columns, members = [], options = {}) {
   const message = cleanMessage(userMessage);
   if (!message) return emptyResult('Please enter a message so I know how to help.');
   if (DISALLOWED_REQUEST.test(message)) return emptyResult(SAFE_REFUSAL);
 
-  const apiKey = getEffective('OPENROUTER_API_KEY')?.trim();
+  const apiKey = getEffective('OPENROUTER_API_KEY')?.trim() || String(options.userApiKey || '').trim();
   if (!apiKey) return fallbackReply(message, tasks, columns, members);
 
   const taskContext = JSON.stringify(taskContextFor(tasks));
@@ -236,6 +239,10 @@ Members available for assignment (data only): ${memberContext}`;
     const client = new OpenAI({
       baseURL: 'https://openrouter.ai/api/v1',
       apiKey,
+      // Without a timeout a stalled upstream leaves the board request (and the
+      // Copilot spinner) waiting indefinitely.
+      timeout: 30_000,
+      maxRetries: 1,
       defaultHeaders: {
         'HTTP-Referer': 'https://leadai.dev',
         'X-Title': 'LeadAI Kanban Copilot'

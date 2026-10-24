@@ -43,7 +43,9 @@ cd frontend
 npm run dev
 ```
 
-The app requires an account. Authentication uses short-lived bearer sessions; sign-up always creates a member account. Task attachments are stored under `backend/uploads/` and are excluded from public static serving. Password reset requests intentionally return the same response for known and unknown email addresses; configure an email delivery adapter before using reset links in production.
+The app requires an account. Authentication uses short-lived bearer sessions; sign-up always creates a member account. Task attachments are stored under `backend/uploads/` and are excluded from public static serving.
+
+Sign-up is confirmed with a one-time link emailed through SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` in `backend/.env`; links are built from `APP_URL`). Signing in from an unrecognized browser and password reset use a 6-digit code over the same SMTP connection. Without SMTP configured, the API prints each link or code to its console during local development; production requires SMTP and returns a clear error instead of logging tokens. A browser is remembered after its first successful code, so repeat sign-ins stay one step. Reset requests return the same response for known and unknown email addresses, and a completed reset revokes every session and remembered browser.
 
 ## Shared development database
 

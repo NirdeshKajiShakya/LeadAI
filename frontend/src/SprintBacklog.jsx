@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Plus,
-  RotateCcw, Search, Sparkles, Target, Trash2, X
+  RotateCcw, Search, Target, X
 } from 'lucide-react';
 import { SPRINT_DURATION_DAYS, formatDateRange, endDateForStart, isCalendarDate } from './sprintDates.js';
 
@@ -144,9 +144,8 @@ export default function SprintBacklog({ token }) {
 
   return <section className="sb-page">
     <div className="sb-context-strip">
-      <div className="sb-crumbs"><span>Project</span><ChevronDown size={13} /><strong>Sprint Backlog</strong></div>
       <div className="sb-selector">
-        <label className="sb-select"><Target size={14} /><select value={selectedId ?? ''} onChange={(event) => switchSprint(event.target.value)} disabled={sprints.length === 0}>
+        <label className="sb-select"><Target size={14} /><select aria-label="Select sprint" value={selectedId ?? ''} onChange={(event) => switchSprint(event.target.value)} disabled={sprints.length === 0}>
           {sprints.length === 0 && <option value="">No sprints yet</option>}
           {sprints.map((sprint) => <option key={sprint.id} value={sprint.id}>{sprint.name}</option>)}
         </select><ChevronDown size={13} /></label>
@@ -201,7 +200,9 @@ export default function SprintBacklog({ token }) {
         <span className="sb-filter-count">{visibleSprintTasks.length} in sprint · {visibleBacklog.length} in backlog</span>
       </section>
 
-      {sprintGroups.map((group) => {
+      {sprintTasks.length === 0
+        ? <div className="sb-empty-row">This sprint has no issues yet. Add work from the product backlog below.</div>
+        : sprintGroups.map((group) => {
         const groupTasks = visibleSprintTasks.filter((task) => task.status === group.id);
         const groupPoints = groupTasks.reduce((sum, task) => sum + (Number(task.storyPoints) || 0), 0);
         return <section key={group.id} className="sb-group">

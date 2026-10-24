@@ -22,6 +22,7 @@ const server = spawn(process.execPath, ['server/index.js'], {
     MONGODB_URI: '',
     ALLOW_MEMORY_DB: '1',
     NODE_ENV: 'test',
+    AUTH_OTP_DISABLED: '1',
     OPENROUTER_API_KEY: ''
   },
   stdio: 'ignore'

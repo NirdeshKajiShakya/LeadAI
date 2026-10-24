@@ -9,7 +9,7 @@ const BASE = `http://127.0.0.1:${PORT}/api`;
 const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 const server = spawn(process.execPath, ['server/index.js'], {
-  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1', NODE_ENV: 'test' },
+  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1', NODE_ENV: 'test', AUTH_OTP_DISABLED: '1' },
   stdio: 'ignore'
 });
 
