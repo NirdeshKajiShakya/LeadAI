@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
-  Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
+  Filter, LayoutGrid, List, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
   ChevronLeft, ChevronRight,
-  Sparkles, Target, UserRound, Users, X, Zap, LoaderCircle, Clock3, Mail, Shield, Trash2
+  PanelLeftClose, PanelLeftOpen, Sparkles, Target, UserRound, Users, X, Zap, LoaderCircle, Clock3, Mail, Shield, Trash2
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
@@ -493,9 +493,9 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
       </div>
     </header>
     <div className="workspace-layout">
-      <aside className="sidebar" data-collapsed={sidebarCollapsed} aria-expanded={!sidebarCollapsed}>
-        <button className="sidebar-collapse" aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((prev) => !prev)}>
-          {sidebarCollapsed ? <Menu size={18} /> : <Menu size={18} />}
+      <aside id="primary-navigation" className="sidebar" data-collapsed={sidebarCollapsed} aria-label="Primary navigation">
+        <button className="sidebar-collapse" aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((prev) => !prev)}>
+          {sidebarCollapsed ? <PanelLeftOpen key="open" size={18} strokeWidth={1.8} /> : <PanelLeftClose key="close" size={18} strokeWidth={1.8} />}
         </button>
         <div className="nav-section"><div className="nav-label">Workspace</div><NavItem active={pathname === '/'} onClick={() => navigate('/')} icon={<LayoutGrid size={15} />} label="Home" /><NavItem active={pathname === '/board'} onClick={() => navigate('/board')} icon={<Target size={15} />} label="Kanban Board" badge="Live" /><NavItem active={pathname === '/backlog'} onClick={() => navigate('/backlog')} icon={<List size={15} />} label="Sprint Backlog" /></div>
         <div className="nav-section"><div className="nav-label">Operations</div><NavItem active={pathname === '/automations'} onClick={() => navigate('/automations')} icon={<Sparkles size={15} />} label="Automations" /><NavItem active={pathname === '/team'} onClick={() => navigate('/team')} icon={<Users size={15} />} label="Team & Workspace" /><NavItem active={pathname === '/settings'} onClick={() => navigate('/settings')} icon={<Settings2 size={15} />} label="Settings" /><NavItem active={pathname === '/profile' || pathname === '/profile/edit'} onClick={() => navigate('/profile')} icon={<UserRound size={15} />} label="Profile" /></div>
@@ -716,4 +716,3 @@ function TaskModal({ status, task, onClose, onSubmit, assignees }) {
 }
 
 export default App;
-
