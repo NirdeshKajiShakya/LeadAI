@@ -24,3 +24,6 @@ backend/dump/
 frontend/dist/assets
 # Playwright CLI output (may contain credentials)
 .playwright-cli/
+.playwright/
+.claude/
+.ui-review/
