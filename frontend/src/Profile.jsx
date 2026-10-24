@@ -176,7 +176,7 @@ function SkillsSection({ skills, onManage }) {
 function SkillManager({ skills, onSave, onCancel }) {
   const safeSkills = Array.isArray(skills) ? skills : [];
   const allSkills = SKILL_CATEGORIES.flatMap((category) => category.skills);
-  const selected = new Set(safeSkills);
+  const [selectedSkills, setSelectedSkills] = useState([...safeSkills]);
   const [query, setQuery] = useState('');
   const [customSkill, setCustomSkill] = useState('');
   const [customSkills, setCustomSkills] = useState(safeSkills.filter((skill) => !allSkills.includes(skill)));
@@ -184,11 +184,7 @@ function SkillManager({ skills, onSave, onCancel }) {
   const filtered = allSkills.filter((skill) => skill.toLowerCase().includes(query.toLowerCase()));
 
   function toggleSkill(skill) {
-    if (selected.has(skill)) {
-      selected.delete(skill);
-    } else {
-      selected.add(skill);
-    }
+    setSelectedSkills((prev) => (prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]));
   }
 
   function addCustomSkill(event) {
@@ -199,16 +195,16 @@ function SkillManager({ skills, onSave, onCancel }) {
       return;
     }
     setCustomSkills([...customSkills, name]);
-    selected.add(name);
+    setSelectedSkills((prev) => [...prev, name]);
     setCustomSkill('');
   }
 
   function removeCustomSkill(skill) {
     setCustomSkills(customSkills.filter((s) => s !== skill));
-    selected.delete(skill);
+    setSelectedSkills((prev) => prev.filter((s) => s !== skill));
   }
 
-  const finalSkills = [...selected];
+  const finalSkills = selectedSkills;
 
   return (
     <section className="profile-section skills-section skill-manager" aria-labelledby="profile-skills-manager-heading">
@@ -244,7 +240,7 @@ function SkillManager({ skills, onSave, onCancel }) {
                 <h3 className="skills-category-title">{category.title}</h3>
                 <ul className="skills-list">
                   {categorySkills.map((skill) => {
-                    const checked = selected.has(skill);
+                    const checked = selectedSkills.includes(skill);
                     return (
                       <li key={skill} className="skills-list-item">
                         <button
@@ -308,17 +304,13 @@ function SkillManager({ skills, onSave, onCancel }) {
 function SkillsEditModal({ open, skills, onSave, onCancel }) {
   const safeSkills = Array.isArray(skills) ? skills : [];
   const allSkills = SKILL_CATEGORIES.flatMap((category) => category.skills);
-  const selected = new Set(safeSkills);
+  const [selectedSkills, setSelectedSkills] = useState([...safeSkills]);
   const [query, setQuery] = useState('');
   const [customSkill, setCustomSkill] = useState('');
   const [customSkills, setCustomSkills] = useState(safeSkills.filter((skill) => !allSkills.includes(skill)));
 
   function toggleSkill(skill) {
-    if (selected.has(skill)) {
-      selected.delete(skill);
-    } else {
-      selected.add(skill);
-    }
+    setSelectedSkills((prev) => (prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]));
   }
 
   function addCustomSkill(event) {
@@ -329,16 +321,16 @@ function SkillsEditModal({ open, skills, onSave, onCancel }) {
       return;
     }
     setCustomSkills([...customSkills, name]);
-    selected.add(name);
+    setSelectedSkills((prev) => [...prev, name]);
     setCustomSkill('');
   }
 
   function removeCustomSkill(skill) {
     setCustomSkills(customSkills.filter((s) => s !== skill));
-    selected.delete(skill);
+    setSelectedSkills((prev) => prev.filter((s) => s !== skill));
   }
 
-  const finalSkills = [...selected];
+  const finalSkills = selectedSkills;
 
   return (
     <div className={`skills-edit-overlay${open ? ' is-open' : ''}`} onClick={onCancel}>
@@ -377,7 +369,7 @@ function SkillsEditModal({ open, skills, onSave, onCancel }) {
                 <h3 className="skills-edit-category-title">{category.title}</h3>
                 <div className="skills-edit-grid">
                   {categorySkills.map((skill) => {
-                    const checked = selected.has(skill);
+                    const checked = selectedSkills.includes(skill);
                     return (
                       <button
                         key={skill}
@@ -411,7 +403,7 @@ function SkillsEditModal({ open, skills, onSave, onCancel }) {
             {customSkills.length > 0 && (
               <div className="skills-edit-grid skills-edit-custom-grid">
                 {customSkills.map((skill) => {
-                  const checked = selected.has(skill);
+                  const checked = selectedSkills.includes(skill);
                   return (
                     <button
                       key={skill}
@@ -479,8 +471,23 @@ export function ProfilePage({ token, navigate }) {
   const sprintState = sprint?.current?.state;
 
   function handleSkillsSave(nextSkills) {
-    setPendingSkills(Array.isArray(nextSkills) ? nextSkills : []);
-    closeSkillsModal();
+    const skills = Array.isArray(nextSkills) ? nextSkills : [];
+    console.log("Saving skills:", skills);
+    setPendingSkills(skills);
+    request('/api/profile', token, {
+      method: 'PATCH',
+      body: JSON.stringify({ skills })
+    })
+      .then((payload) => {
+        reload();
+        console.log("Skills saved successfully:", payload.profile.skills);
+      })
+      .catch((saveError) => {
+        console.error("Failed to save skills:", saveError);
+      })
+      .finally(() => {
+        closeSkillsModal();
+      });
   }
 
   return <section className="profile-page">

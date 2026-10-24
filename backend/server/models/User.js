@@ -11,6 +11,9 @@ const userSchema = new mongoose.Schema({
   bio: { type: String, default: '', maxlength: 300 },
   location: { type: String, default: '', maxlength: 80 },
   website: { type: String, default: '', maxlength: 200 },
+  // Technical skills the member has listed on their profile (e.g. ["React", "Python", "Docker"]).
+  // Used by the Copilot to suggest task assignments. Optional; defaults to an empty array.
+  skills: { type: [String], default: [], trim: true },
   // Small inline image (data URL, <= 80 KB decoded). Avoids a public upload directory
   // and keeps avatars in the shared database instead of one developer's disk.
   avatar: { type: String, default: '', maxlength: 110_000 },
