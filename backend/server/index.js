@@ -421,7 +421,7 @@ async function buildDashboard(req) {
     boards: boardCards,
     priorityTasks,
     activeSprint,
-    ai: { configured: Boolean(process.env.OPENROUTER_API_KEY?.trim()) }
+    ai: { configured: Boolean(getEffective('OPENROUTER_API_KEY')?.trim()) }
   };
 }
 
@@ -1235,9 +1235,9 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
     const input = normalizeBoardGenerationRequest(req.body || {});
     if (input.error) return res.status(400).json({ error: input.error });
 
-    if (!process.env.OPENROUTER_API_KEY?.trim()) {
+    if (!getEffective('OPENROUTER_API_KEY')?.trim()) {
       return res.status(503).json({
-        error: 'AI board generation is not configured on this server. Add OPENROUTER_API_KEY to backend/.env and restart the API, or create a board manually.',
+        error: 'AI board generation is not configured. Add your OpenRouter API key in Settings or backend/.env, or create a board manually.',
         code: 'AI_NOT_CONFIGURED'
       });
     }

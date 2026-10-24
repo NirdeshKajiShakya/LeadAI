@@ -191,6 +191,23 @@ export default function SettingsPage({ token, navigate }) {
         </div>
       </section>
 
+      <section className="profile-card" aria-labelledby="settings-fallback-heading">
+        <div className="profile-card-head">
+          <h2 id="settings-fallback-heading">Configuration priority</h2>
+          <p>Values you save here take precedence over backend/.env. Leave blank to fall back to .env, then to local defaults.</p>
+        </div>
+        <div className="profile-fields">
+          <div className="field-full">
+            <div className="field-foot">
+              <small>Tiered fallback for MongoDB URI: <strong>Settings override</strong> → backend/.env → <code>mongodb://localhost:27017/leadai</code> (local default).</small>
+            </div>
+            <div className="field-foot">
+              <small>Tiered fallback for OpenRouter API key: <strong>Settings override</strong> → backend/.env → AI disabled with a graceful message (no crash).</small>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="profile-card" aria-labelledby="settings-ai-heading">
         <div className="profile-card-head">
           <h2 id="settings-ai-heading">

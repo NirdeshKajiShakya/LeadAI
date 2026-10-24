@@ -26,36 +26,38 @@ export function parseDatabaseName(uri) {
 }
 
 export async function connectDatabase() {
-  const uri = String(getEffective('MONGODB_URI')).trim();
-  if (!uri) {
-    if (memoryAllowed()) {
-      mode = 'memory';
-      return databaseStatus();
-    }
-    throw new Error('MONGODB_URI is not set. Add the shared development URI to backend/.env (see backend/.env.example), or set ALLOW_MEMORY_DB=true for throwaway demo data.');
-  }
+  // Tiered fallback hierarchy for MONGODB_URI:
+  //   Tier 1: User Settings override (via /api/settings/env)  -> getEffective
+  //   Tier 2: Environment variable (backend/.env)            -> process.env
+  //   Tier 3: Local default fallback                         -> mongodb://localhost:27017/leadai
+  const overrideUri = String(getEffective('MONGODB_URI')).trim();
+  const envUri = String(process.env.MONGODB_URI || '').trim();
+  const uri = overrideUri || envUri || 'mongodb://localhost:27017/leadai';
+
+  let source = 'local default';
+  if (overrideUri) source = 'user settings override';
+  else if (envUri) source = 'environment variable';
+
   if (!/^mongodb(\+srv)?:\/\//.test(uri)) {
     throw new Error('MONGODB_URI must start with mongodb:// or mongodb+srv://.');
   }
   const name = parseDatabaseName(uri);
   if (!name) {
-    throw new Error('MONGODB_URI must name a database, e.g. mongodb://127.0.0.1:27017/leadai_dev.');
+    throw new Error('MONGODB_URI must name a database, e.g. mongodb://127.0.0.1:27017/leadai.');
   }
   mongoose.connection.on('disconnected', () => console.warn('[db] MongoDB disconnected; requests fail until the driver reconnects.'));
   mongoose.connection.on('reconnected', () => console.log('[db] MongoDB reconnected.'));
   try {
-    // Atlas clusters can take several seconds to answer the first handshake.
     await mongoose.connect(uri, { serverSelectionTimeoutMS: 10_000, connectTimeoutMS: 10_000 });
   } catch (error) {
     lastError = error.message;
-    throw new Error(`Could not connect to MongoDB database "${name}": ${error.message}`);
+    throw new Error('Could not connect to MongoDB database "' + name + '": ' + error.message);
   }
   mode = 'mongodb';
   lastError = null;
-  console.log(`[db] Connected to MongoDB database "${name}" on ${mongoose.connection.host}`);
+  console.log('[db] Connected successfully using ' + source + ' (' + name + ') on ' + mongoose.connection.host);
   return databaseStatus();
 }
-
 export async function disconnectDatabase() {
   await mongoose.disconnect();
 }
