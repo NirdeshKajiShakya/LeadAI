@@ -14,11 +14,18 @@ export function isOpenTask(task) {
   return Boolean(task) && task.status !== 'done';
 }
 
-// `dueDate` is free text in the data model. Only a real calendar date can be
-// compared, so relative values such as "This week" are intentionally ignored.
+// MongoDB stores dueDate as a Date while the UI and these rules speak
+// YYYY-MM-DD, so both shapes normalise through here. Free-text legacy values
+// are ignored: only a real calendar date can be compared with today.
+export function dueDateText(value) {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+  return typeof value === 'string' ? value : '';
+}
+
 export function isOverdueTask(task, today = todayIsoDate()) {
   if (!isOpenTask(task)) return false;
-  return isValidIsoDate(task.dueDate) && isValidIsoDate(today) && task.dueDate < today;
+  const due = dueDateText(task.dueDate);
+  return isValidIsoDate(due) && isValidIsoDate(today) && due < today;
 }
 
 // Assignees are stored as board member names (falling back to the account email
@@ -35,7 +42,8 @@ function createdTime(task) {
 }
 
 function dueDateOf(task) {
-  return isValidIsoDate(task?.dueDate) ? task.dueDate : null;
+  const due = dueDateText(task?.dueDate);
+  return isValidIsoDate(due) ? due : null;
 }
 
 // Attention order, highest first:

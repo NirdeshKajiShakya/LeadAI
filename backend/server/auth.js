@@ -4,15 +4,19 @@ import { User } from './models/User.js';
 
 export const BCRYPT_ROUNDS = 12;
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-export const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+export const MAX_TRUSTED_DEVICES = 10;
+export const DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
 
 export const sessions = new Map();
-export const resetTokens = new Map();
 export const memoryUsers = new Map();
 let databaseReady = false;
 
 export function setDatabaseReady(value) {
   databaseReady = value;
+}
+
+export function isDatabaseReady() {
+  return databaseReady;
 }
 
 export function createAuthError(status, message) {
@@ -46,9 +50,10 @@ export function validatePassword(password) {
 export function serializeUser(user) {
   const value = user?.toObject ? user.toObject() : { ...user };
   delete value.passwordHash;
-  delete value.resetToken;
-  delete value.resetTokenExpiresAt;
   delete value.authSessions;
+  // Device hashes are as sensitive as a session token: a leaked one would let
+  // someone skip the emailed sign-in code.
+  delete value.trustedDevices;
   return value;
 }
 
@@ -71,7 +76,7 @@ export async function findUserById(id) {
   return User.findById(id);
 }
 
-export async function createUser({ email, password, name, role = 'member' }) {
+export async function createUser({ email, password, name, role = 'member', emailVerified = true }) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
     throw createAuthError(400, 'A valid email address is required.');
@@ -83,7 +88,8 @@ export async function createUser({ email, password, name, role = 'member' }) {
     email: normalizedEmail,
     passwordHash,
     name: String(name || '').trim().slice(0, 80) || normalizedEmail,
-    role: role === 'admin' ? 'member' : role
+    role: role === 'admin' ? 'member' : role,
+    emailVerified: emailVerified !== false
   };
   if (!databaseReady) {
     if (memoryUsers.has(normalizedEmail)) throw createAuthError(409, 'An account with this email already exists.');
@@ -107,6 +113,58 @@ export async function authenticateUser({ email, password }) {
     throw createAuthError(401, 'Invalid credentials.');
   }
   return user;
+}
+
+// Accounts created before email verification existed have no `emailVerified`
+// field; Mongoose applies the schema default (true) when hydrating them, so
+// only an explicit false means "not verified yet".
+export function isEmailVerified(user) {
+  return user?.emailVerified !== false;
+}
+
+export async function markEmailVerified(user) {
+  user.emailVerified = true;
+  if (databaseReady) {
+    await User.updateOne({ _id: user._id }, { $set: { emailVerified: true } });
+  } else if (memoryUsers.has(user.email)) {
+    memoryUsers.set(user.email, { ...memoryUsers.get(user.email), emailVerified: true });
+  }
+}
+
+export function normalizeDeviceId(value) {
+  const id = String(value || '').trim();
+  return DEVICE_ID_PATTERN.test(id) ? id : null;
+}
+
+function hashDeviceId(deviceId) {
+  return crypto.createHash('sha256').update(String(deviceId)).digest('hex');
+}
+
+// Only a hash is stored, so reading the database does not hand out a way past
+// the new-device check.
+export function isTrustedDevice(user, deviceId) {
+  const hash = hashDeviceId(deviceId);
+  return (user?.trustedDevices || []).some((device) => device.deviceHash === hash);
+}
+
+export async function trustDevice(user, deviceId, label = '') {
+  const now = new Date();
+  const hash = hashDeviceId(deviceId);
+  const devices = (user.trustedDevices || []).filter((device) => device.deviceHash !== hash);
+  devices.push({
+    deviceHash: hash,
+    label: String(label || '').slice(0, 120),
+    trustedAt: now,
+    lastSeenAt: now
+  });
+  // Keep the most recent devices only; the oldest trust entries are dropped.
+  const trimmed = devices.slice(-MAX_TRUSTED_DEVICES);
+  user.trustedDevices = trimmed;
+  if (databaseReady) {
+    await User.updateOne({ _id: user._id }, { $set: { trustedDevices: trimmed } });
+  } else if (memoryUsers.has(user.email)) {
+    memoryUsers.set(user.email, { ...memoryUsers.get(user.email), trustedDevices: trimmed });
+  }
 }
 
 // Profile edits must show up in the current tab (and any other signed-in tab) without a re-login.
@@ -152,6 +210,14 @@ export async function requireAuth(req, res, next) {
     const token = getBearerToken(req);
     const session = token && await resolveSession(token);
     if (!session) return res.status(401).json({ error: 'Session expired or invalid.' });
+    // Defence in depth: a session must never outrank an unverified account,
+    // even if one was created before verification was introduced.
+    if (session.user.emailVerified === false) {
+      return res.status(403).json({
+        code: 'EMAIL_NOT_VERIFIED',
+        error: 'Verify your email address before continuing.'
+      });
+    }
     req.authToken = token;
     req.user = session.user;
     req.role = session.user.role;
@@ -180,17 +246,4 @@ export async function revokeAllSessionsForUser(userId) {
     if (String(session.user._id) === String(userId)) sessions.delete(token);
   });
   if (databaseReady) await User.updateOne({ _id: userId }, { $set: { authSessions: [] } });
-}
-
-export function createResetToken(userId) {
-  const token = randomToken();
-  resetTokens.set(token, { userId: String(userId), expiresAt: Date.now() + RESET_TOKEN_TTL_MS });
-  return token;
-}
-
-export function consumeResetToken(token) {
-  const record = resetTokens.get(token);
-  resetTokens.delete(token);
-  if (!record || record.expiresAt <= Date.now()) return null;
-  return record;
 }

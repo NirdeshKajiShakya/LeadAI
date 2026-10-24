@@ -8,33 +8,43 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Task } from './models/Task.js';
 import { Sprint } from './models/Sprint.js';
+import { TaskHistory } from './models/TaskHistory.js';
 import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { sortBacklog } from './lib/backlogOrder.js';
 import {
   BACKLOG_STATUS, SPRINT_ENTRY_STATUS, isPermittedSprintStatusChange,
   sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
 } from './lib/taskTransitions.js';
+import { convertDueDate, migrateLegacyFields } from './lib/taskMigration.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
 import { connectDatabase, databaseStatus, reconnectDatabase } from './db.js';
 import { Board } from './models/Board.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
-  requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
-  createResetToken, consumeResetToken, memoryUsers, hashPassword, setDatabaseReady,
+  requireAuth, requireRole, invalidateSession, revokeAllSessionsForUser, validatePassword,
+  memoryUsers, hashPassword, setDatabaseReady,
   refreshSessionUser, serializeUser, sessions,
-  findUserByEmail, findUserById
+  findUserByEmail, findUserById,
+  isEmailVerified, markEmailVerified, normalizeDeviceId, isTrustedDevice, trustDevice
 } from './auth.js';
+import { issueCode, verifyCode, findCodeByChallenge, findActiveChallenge, discardCode } from './lib/authCodes.js';
+import {
+  issueVerificationToken, consumeVerificationToken, clearVerificationTokens,
+  RESEND_COOLDOWN_MS
+} from './lib/emailVerification.js';
+import { sendMail } from './lib/email.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
 import {
   setOverride, removeOverride, clearOverrides, getAllEffective
 } from './lib/envConfig.js';
 import{
-  BOARD_SUMMARY_LIMIT, PRIORITY_TASK_LIMIT, activeSprintsOf, isOpenTask, isOverdueTask,
+  BOARD_SUMMARY_LIMIT, PRIORITY_TASK_LIMIT, activeSprintsOf, dueDateText, isOpenTask, isOverdueTask,
   numberOf, orderDashboardTasks, stageCounts, taskBelongsTo
 } from './lib/dashboard.js';
 import {
   boardNameFromGoal, createBoardWithPlan, normalizeBoardGenerationRequest, planningMessage, tasksFromAiResult
 } from './lib/aiBoardPlan.js';
+import { applyStatusLifecycle } from './lib/taskService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -56,6 +66,7 @@ const rateLimits = new Map();
 let mongoReady = false;
 let memorySprints = [];
 let memoryBoards = [];
+let memoryTaskHistory = [];
 
 fs.mkdirSync(uploadsDir, { recursive: true });
 app.use(express.json({ limit: '150kb' }));
@@ -66,11 +77,19 @@ app.use((_req, res, next) => {
   res.setHeader('Referrer-Policy', 'same-origin');
   next();
 });
+const RATE_LIMIT_WINDOW_MS = 60_000;
 app.use((req, res, next) => {
   const key = `${req.ip}:${req.path}`;
   const now = Date.now();
+  // Expired windows are only removed when their key is used again, so sweep
+  // occasionally to keep the map from growing with every unique visitor.
+  if (rateLimits.size > 5_000) {
+    for (const [entryKey, entry] of rateLimits) {
+      if (now - entry.startedAt > RATE_LIMIT_WINDOW_MS) rateLimits.delete(entryKey);
+    }
+  }
   const windowStart = rateLimits.get(key) || { count: 0, startedAt: now };
-  if (now - windowStart.startedAt > 60_000) {
+  if (now - windowStart.startedAt > RATE_LIMIT_WINDOW_MS) {
     windowStart.count = 0;
     windowStart.startedAt = now;
   }
@@ -83,12 +102,17 @@ app.use((req, res, next) => {
 
 function starterTasksFor(user) {
   const name = user?.name && user.name !== user.email ? user.name : 'You';
+  // Task.dueDate is a real date, so the starter templates must use dates too.
+  // Free text ("Today", "This week") failed schema validation and made every
+  // signup return 500 after the account had already been created.
+  const today = todayIsoDate();
+  const inDays = (days) => new Date(Date.parse(`${today}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
   return [
-    { title: 'Welcome to your LeadAI board', status: 'done', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: 'Today', description: 'This board belongs to you. Create, organize, and move tasks however you like.' },
-    { title: 'Create your first task', status: 'todo', priority: 'high', labels: ['Getting Started'], assignee: name, dueDate: 'Today', description: 'Click "Add Task" to capture something you are working on. Try adding a label and a due date.' },
-    { title: 'Drag a card between columns', status: 'todo', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: 'Unscheduled', description: 'Move this card from To Do into In Progress to watch the board update instantly.' },
-    { title: 'Agree on a definition of done', status: 'review', priority: 'medium', labels: ['Process'], assignee: name, dueDate: 'This week', description: 'A clear definition of done keeps completed work consistent across your board.' },
-    { title: 'Invite a teammate to collaborate', status: 'backlog', priority: 'medium', labels: ['Team'], assignee: 'Unassigned', dueDate: 'Unscheduled', description: 'Share your workspace so others can comment on and track shared work.' }
+    { title: 'Welcome to your LeadAI board', status: 'done', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: today, description: 'This board belongs to you. Create, organize, and move tasks however you like.' },
+    { title: 'Create your first task', status: 'todo', priority: 'high', labels: ['Getting Started'], assignee: name, dueDate: today, description: 'Click "Add Task" to capture something you are working on. Try adding a label and a due date.' },
+    { title: 'Drag a card between columns', status: 'todo', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: null, description: 'Move this card from To Do into In Progress to watch the board update instantly.' },
+    { title: 'Agree on a definition of done', status: 'review', priority: 'medium', labels: ['Process'], assignee: name, dueDate: inDays(3), description: 'A clear definition of done keeps completed work consistent across your board.' },
+    { title: 'Invite a teammate to collaborate', status: 'backlog', priority: 'medium', labels: ['Team'], assignee: 'Unassigned', dueDate: null, description: 'Share your workspace so others can comment on and track shared work.' }
   ];
 }
 let memoryTasks = [];
@@ -114,9 +138,7 @@ function withSprintId(sprint) {
 }
 async function seedStarterTasks(user, board) {
   for (const template of starterTasksFor(user)) {
-    let key;
-    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
-    await store.create({ key, ownerId: String(user._id), boardId: boardId(board), ...template, comments: [], attachments: [], dependencies: [] });
+    await store.create({ key: await newTaskKey(), ownerId: String(user._id), boardId: boardId(board), ...template, comments: [], attachments: [], dependencies: [] });
   }
 }
 
@@ -150,6 +172,7 @@ const store = {
     return { deletedCount: before - memoryTasks.length };
   },
   listBySprint: (id) => mongoReady ? Task.find({ sprintId: id }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.sprintId) === String(id))),
+  listByBoard: (id) => mongoReady ? Task.find({ boardId: id }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.boardId) === String(id))),
   // Board and profile queries are owner-scoped in the database; a shared database must
   // never require loading every developer's tasks to show one person's board.
   listByOwner: (ownerId) => mongoReady ? Task.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.ownerId) === String(ownerId))),
@@ -158,6 +181,18 @@ const store = {
     return Task.find(ownerId ? { sprintId: null, ownerId } : { sprintId: null }).sort({ createdAt: 1 }).lean();
   }
 };
+
+// Ids are generated by us, so a collision is rare; a bounded retry still beats
+// looping forever if the collection ever grows past the key space.
+// ponytail: 24-bit random suffix (16.7M keys), switch to a per-board counter if a
+// single database ever reaches that many tasks.
+async function newTaskKey() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const key = `KAN-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    if (!await store.find(key)) return key;
+  }
+  throw createAuthError(503, 'Could not allocate a task key. Please try again.');
+}
 
 const sprintStore = {
   list: (ownerId) => mongoReady ? Sprint.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memorySprints.filter((sprint) => String(sprint.ownerId) === String(ownerId))),
@@ -185,7 +220,12 @@ const boardStore = {
   list: (userId) => mongoReady
     ? Board.find({ $or: [{ ownerId: userId }, { memberIds: userId }] }).sort({ createdAt: 1 }).lean()
     : Promise.resolve(memoryBoards.filter((board) => String(board.ownerId) === String(userId) || (board.memberIds || []).includes(String(userId)))),
-  find: (id) => mongoReady ? Board.findById(id).lean() : Promise.resolve(memoryBoards.find((board) => boardId(board) === String(id))),
+  // A well-formed-looking id that is not an ObjectId would otherwise throw a
+  // CastError and surface as a 500 instead of a clean 404.
+  find: (id) => {
+    if (!mongoReady) return Promise.resolve(memoryBoards.find((board) => boardId(board) === String(id)));
+    return mongoose.isValidObjectId(id) ? Board.findById(id).lean() : Promise.resolve(null);
+  },
   create: async (data) => {
     if (mongoReady) return new Board(data).save();
     const board = { ...data, _id: `mem-board-${Date.now()}-${crypto.randomUUID()}`, createdAt: new Date() };
@@ -193,14 +233,20 @@ const boardStore = {
     return board;
   },
   update: async (id, data) => {
-    if (mongoReady) return Board.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true }).lean();
+    if (mongoReady) {
+      if (!mongoose.isValidObjectId(id)) return null;
+      return Board.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true }).lean();
+    }
     const current = await boardStore.find(id);
     if (!current) return null;
     memoryBoards = memoryBoards.map((board) => boardId(board) === String(id) ? { ...board, ...data } : board);
     return boardStore.find(id);
   },
   remove: async (id) => {
-    if (mongoReady) return Board.deleteOne({ _id: id });
+    if (mongoReady) {
+      if (!mongoose.isValidObjectId(id)) return { deletedCount: 0 };
+      return Board.deleteOne({ _id: id });
+    }
     const before = memoryBoards.length;
     memoryBoards = memoryBoards.filter((board) => boardId(board) !== String(id));
     return { deletedCount: before - memoryBoards.length };
@@ -209,6 +255,104 @@ const boardStore = {
 
 async function createDefaultBoard(user) {
   return boardStore.create({ ownerId: String(user._id), memberIds: [String(user._id)], name: `${user.name || 'My'}'s board` });
+}
+
+// A newly verified account gets its starter board exactly once. Seeding is
+// deferred until verification so abandoned signups do not fill the database
+// with boards and tasks.
+async function ensureStarterWorkspace(user) {
+  const existing = await boardStore.list(String(user._id));
+  if (existing.length) return existing[0];
+  const board = await createDefaultBoard(user);
+  await seedStarterTasks(user, board);
+  return board;
+}
+
+const CODE_EMAILS = {
+  signup: {
+    subject: 'Confirm your LeadAI email address',
+    intro: 'Use this code to confirm your email and finish setting up your LeadAI workspace.'
+  },
+  login: {
+    subject: 'Your LeadAI sign-in code',
+    intro: 'Someone signed in to LeadAI from a browser we do not recognize. Use this code to continue.'
+  },
+  reset: {
+    subject: 'Reset your LeadAI password',
+    intro: 'Use this code to choose a new LeadAI password.'
+  }
+};
+
+async function sendCodeEmail({ email, purpose, code }) {
+  const copy = CODE_EMAILS[purpose] || CODE_EMAILS.login;
+  const text = `${copy.intro}\n\n    ${code}\n\nThis code expires in 10 minutes. If you did not request it, you can ignore this email.`;
+  return sendMail({ to: email, subject: copy.subject, text });
+}
+
+// Verification links point at the frontend, not the API. APP_URL is the
+// explicit setting; development falls back to Vite and production falls back
+// to the host that served the request.
+function publicAppUrl(req) {
+  const configured = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  if (configured) return configured;
+  if (process.env.NODE_ENV === 'production') return `${req.protocol}://${req.get('host')}`;
+  return 'http://localhost:5173';
+}
+
+function verificationUrl(req, token) {
+  // The token lives in the fragment so it never reaches server, proxy, or
+  // access logs when the link is opened.
+  return `${publicAppUrl(req)}/verify-email#token=${encodeURIComponent(token)}`;
+}
+
+async function sendVerificationEmail({ req, email, token }) {
+  const link = verificationUrl(req, token);
+  const text = [
+    'Confirm your LeadAI email address',
+    '',
+    'Thanks for signing up for LeadAI. Open this link to verify your email and activate your account:',
+    '',
+    link,
+    '',
+    'This link expires in 30 minutes and can only be used once.',
+    'If you did not create a LeadAI account, you can ignore this email.'
+  ].join('\n');
+  return sendMail({ to: email, subject: 'Confirm your LeadAI email address', text });
+}
+
+// Test suites that only need a session set AUTH_OTP_DISABLED=1. It is never a
+// production default: unset means email verification is on.
+const otpEnabled = () => process.env.AUTH_OTP_DISABLED !== '1';
+
+function requestDevice(req) {
+  return {
+    id: normalizeDeviceId(req.body?.deviceId),
+    label: String(req.body?.deviceLabel || req.get('user-agent') || '').slice(0, 120)
+  };
+}
+
+async function startSessionFor(user) {
+  const session = createAuthSession(user);
+  if (mongoReady) await User.updateOne({ _id: user._id }, { $addToSet: { authSessions: session.token } });
+  return session;
+}
+
+async function issueAuthChallenge(user, purpose) {
+  const { challengeId, code } = await issueCode({ email: user.email, purpose });
+  await sendCodeEmail({ email: user.email, purpose, code });
+  return challengeId;
+}
+
+function otpResponse(user, purpose, challengeId) {
+  return {
+    otpRequired: true,
+    purpose,
+    challengeId,
+    email: user.email,
+    message: purpose === 'signup'
+      ? 'Enter the 6-digit code we emailed you to confirm your account.'
+      : 'Enter the 6-digit code we emailed you to finish signing in.'
+  };
 }
 
 async function authorizedBoard(req, res, options = {}) {
@@ -309,9 +453,9 @@ async function assignedOpenTaskCounts(accessibleIds, names, today) {
     const openQuery = { boardId: { $in: accessibleIds }, assignee: { $in: names }, status: { $ne: 'done' } };
     const [open, overdue] = await Promise.all([
       Task.countDocuments(openQuery),
-      // Free-text due dates ("This week") are deliberately excluded; only a real
-      // calendar date can be compared with today.
-      Task.countDocuments({ ...openQuery, dueDate: { $regex: /^\d{4}-\d{2}-\d{2}$/, $lt: today } })
+      // dueDate is a real Date in the schema, so it is compared as a date, not
+      // matched as text (a $regex against a Date field throws in MongoDB).
+      Task.countDocuments({ ...openQuery, dueDate: { $ne: null, $lt: new Date(`${today}T00:00:00.000Z`) } })
     ]);
     return { open, overdue };
   }
@@ -399,7 +543,7 @@ async function buildDashboard(req) {
       title: String(task.title || ''),
       status: String(task.status || 'backlog'),
       priority: String(task.priority || 'medium'),
-      dueDate: String(task.dueDate || ''),
+      dueDate: dueDateText(task.dueDate),
       assignee: String(task.assignee || 'Unassigned'),
       storyPoints: numberOf(task.storyPoints),
       boardId: String(task.boardId || ''),
@@ -423,6 +567,15 @@ async function buildDashboard(req) {
     activeSprint,
     ai: { configured: Boolean(process.env.OPENROUTER_API_KEY?.trim()) }
   };
+}
+
+// Date-only field: MongoDB hands back a Date, the board UI expects YYYY-MM-DD.
+function taskView(task) {
+  if (!task) return task;
+  // A Mongoose document keeps its fields behind toObject(); spreading the
+  // document directly would drop them from the response.
+  const value = typeof task.toObject === 'function' ? task.toObject() : task;
+  return { ...value, dueDate: dueDateText(value.dueDate) || null };
 }
 
 function userId(req) { return String(req.user._id); }
@@ -466,11 +619,43 @@ function validateTaskInput(body, partial = false) {
   if (body.assignee !== undefined && (typeof body.assignee !== 'string' || body.assignee.trim().length > 120)) throw createAuthError(400, 'Assignee must be text up to 120 characters.');
   if (body.dueDate !== undefined && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
   if (body.sprintId !== undefined && (body.sprintId !== null && (typeof body.sprintId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.sprintId)))) throw createAuthError(400, 'Invalid sprint id.');
+  if (body.assigneeId !== undefined && (body.assigneeId !== null && (typeof body.assigneeId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.assigneeId)))) throw createAuthError(400, 'Invalid assignee id.');
   if (body.storyPoints !== undefined && (!Number.isInteger(body.storyPoints) || body.storyPoints < 0 || body.storyPoints > 100)) throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
+  if (body.estimateHours !== undefined && (typeof body.estimateHours !== 'number' || !Number.isFinite(body.estimateHours) || body.estimateHours < 0 || body.estimateHours > 1000)) throw createAuthError(400, 'Estimate hours must be a number from 0 to 1000.');
 }
+
+// What a person can type into the due-date field. Relative words the API accepts
+// are resolved here; legacy values ("Oct 18", "Unscheduled") stay in
+// convertDueDate so the migration keeps its own, narrower contract.
+function parseDueDateInput(raw, today = todayIsoDate()) {
+  const text = String(raw || '').trim();
+  const normalized = text.toLowerCase();
+  const date = new Date(`${today}T00:00:00Z`);
+  if (normalized === 'today') return { date, reason: null };
+  if (normalized === 'tomorrow') {
+    date.setUTCDate(date.getUTCDate() + 1);
+    return { date, reason: null };
+  }
+  if (normalized === 'this week') {
+    date.setUTCDate(date.getUTCDate() + ((7 - date.getUTCDay()) % 7));
+    return { date, reason: null };
+  }
+  return convertDueDate(text, today);
+}
+
 function validTaskKey(key) { return typeof key === 'string' && /^KAN-[A-Z0-9]+$/i.test(key); }
 function taskUpdates(body) {
-  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate', 'sprintId', 'storyPoints'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'assigneeId', 'dueDate', 'sprintId', 'storyPoints', 'estimateHours'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+}
+
+async function writeTaskHistory(taskId, teamId, from, to, actorId, at) {
+  if (!actorId) return;
+  const entry = { taskId: String(taskId), teamId: teamId ? String(teamId) : null, from: from ?? null, to: String(to), actorId: String(actorId), at: at || new Date() };
+  if (mongoReady) {
+    await TaskHistory.create(entry);
+  } else {
+    memoryTaskHistory = [...memoryTaskHistory, { ...entry, _id: crypto.randomUUID(), createdAt: new Date(), updatedAt: new Date() }];
+  }
 }
 function dependencyGraph(tasks) {
   const graph = new Map(tasks.map((task) => [task.key, (task.dependencies || []).map((dep) => dep.toTask)]));
@@ -674,16 +859,33 @@ app.get('/api/dashboard/summary', requireAuth, async (req, res, next) => {
   try { res.json(await buildDashboard(req)); } catch (error) { next(error); }
 });
 
-app.get('/api/settings/env', requireAuth, (_req, res) => {
+// Server configuration is operator data. Members may see whether it is
+// configured; only an admin can change it. Secrets are never returned, so a
+// compromised member session cannot exfiltrate the database URI or AI key.
+function settingsView(canEdit) {
   const effective = getAllEffective();
-  res.json({
-    mongodbUri: effective.MONGODB_URI,
-    openrouterApiKey: effective.OPENROUTER_API_KEY,
-    openrouterModel: effective.OPENROUTER_MODEL,
-  });
+  const uri = String(effective.MONGODB_URI || '');
+  const key = String(effective.OPENROUTER_API_KEY || '');
+  return {
+    canEdit,
+    // Whether the server is configured is useful to everyone (it explains why
+    // Copilot is offline). The host, database name and key hint are
+    // infrastructure detail and stay with administrators.
+    mongodbConfigured: Boolean(uri),
+    mongodbDatabase: canEdit ? /^mongodb(?:\+srv)?:\/\/[^/]*\/([^?]+)/.exec(uri)?.[1] || null : null,
+    mongodbHost: canEdit ? /^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?([^/?]+)/.exec(uri)?.[1] || null : null,
+    openrouterConfigured: Boolean(key),
+    openrouterKeyHint: canEdit && key ? `••••${key.slice(-4)}` : '',
+    openrouterModel: effective.OPENROUTER_MODEL || ''
+  };
+}
+
+app.get('/api/settings/env', requireAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(settingsView(req.role === 'admin'));
 });
 
-app.post('/api/settings/env', requireAuth, async (req, res, next) => {
+app.post('/api/settings/env', requireAuth, requireRole('admin'), async (req, res, next) => {
   try {
     const { mongodbUri, openrouterApiKey, openrouterModel } = req.body || {};
     const updates = {};
@@ -713,37 +915,167 @@ app.post('/api/settings/env', requireAuth, async (req, res, next) => {
     // the override if the new URI cannot connect, keeping the server running.
     if (uriChanged) {
       try {
-        await reconnectDatabase();
+        const status = await reconnectDatabase();
+        // Keep the request-time store in sync with the connection that just opened.
+        mongoReady = status.mode === 'mongodb';
+        setDatabaseReady(mongoReady);
       } catch (error) {
         removeOverride('MONGODB_URI');
         return res.status(400).json({ error: `Could not connect to MongoDB: ${error.message}. Override reverted.` });
       }
     }
 
-    const effective = getAllEffective();
-    res.json({
-      saved: true,
-      mongodbUri: effective.MONGODB_URI,
-      openrouterApiKey: effective.OPENROUTER_API_KEY,
-      openrouterModel: effective.OPENROUTER_MODEL,
-    });
+    res.json({ saved: true, ...settingsView(true) });
   } catch (error) { next(error); }
 });
 
 app.post('/api/auth/signup', async (req, res, next) => {
   try {
-    const user = await createUser(req.body || {});
-    const board = await createDefaultBoard(user);
-    await seedStarterTasks(user, board);
-    res.status(201).json(user);
+    if (!otpEnabled()) {
+      const legacyUser = await createUser(req.body || {});
+      const board = await createDefaultBoard(legacyUser);
+      await seedStarterTasks(legacyUser, board);
+      return res.status(201).json(legacyUser);
+    }
+    const user = await createUser({ ...(req.body || {}), emailVerified: false });
+    try {
+      const issued = await issueVerificationToken({ email: user.email, userId: user._id });
+      await sendVerificationEmail({ req, email: user.email, token: issued.token });
+    } catch (error) {
+      // Never leave an account nobody can verify behind when its email could
+      // not be sent.
+      await clearVerificationTokens(user.email).catch(() => {});
+      if (mongoReady) await User.deleteOne({ _id: user._id, emailVerified: false });
+      else memoryUsers.delete(user.email);
+      if (isAuthError(error)) throw error;
+      console.error('Signup verification email failed:', error.message);
+      throw createAuthError(503, 'We could not send the verification email. Check the mail server settings and try again.');
+    }
+    return res.status(201).json({
+      verificationRequired: true,
+      email: user.email,
+      message: 'Check your email to verify your account.'
+    });
   } catch (error) { next(error); }
 });
 app.post('/api/auth/signin', async (req, res, next) => {
   try {
     const user = await authenticateUser(req.body || {});
-    const session = createAuthSession(user);
-    if (mongoReady) await User.updateOne({ _id: user._id }, { $addToSet: { authSessions: session.token } });
-    res.json(session);
+    // No session is issued until the email address is confirmed. This check is
+    // server-side on every sign-in, never trusted from the frontend.
+    if (!isEmailVerified(user)) {
+      return res.status(403).json({
+        code: 'EMAIL_NOT_VERIFIED',
+        error: 'Verify your email address before signing in. Check your inbox or resend the verification email.'
+      });
+    }
+    if (otpEnabled()) {
+      const device = requestDevice(req);
+      const purpose = !device.id || !isTrustedDevice(user, device.id) ? 'login' : null;
+      if (purpose) {
+        // A code may already be in flight. Reuse it rather than replying with
+        // the resend cooldown.
+        const active = await findActiveChallenge({ email: user.email, purpose });
+        if (active) return res.json(otpResponse(user, purpose, active.challengeId));
+        let challengeId;
+        try {
+          challengeId = await issueAuthChallenge(user, purpose);
+        } catch (error) {
+          if (isAuthError(error)) throw error;
+          console.error('Sign-in code email failed:', error.message);
+          throw createAuthError(503, 'We could not send the sign-in code. Check the mail server settings and try again.');
+        }
+        return res.json(otpResponse(user, purpose, challengeId));
+      }
+    }
+    res.json(await startSessionFor(user));
+  } catch (error) { next(error); }
+});
+app.post('/api/auth/verify-email', async (req, res, next) => {
+  // Links carry a one-time token; never let a cache or intermediary store the
+  // response or the request URL.
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const record = await consumeVerificationToken({ token: req.body?.token });
+    const user = await findUserByEmail(record.email);
+    if (!user || String(user._id) !== String(record.userId)) {
+      return res.status(400).json({ error: 'This verification link is no longer valid. Request a new one.' });
+    }
+    // Delivery failures happen before this point, so reaching here means the
+    // address was proven; only then is the flag written.
+    if (!isEmailVerified(user)) await markEmailVerified(user);
+    await ensureStarterWorkspace(user);
+    res.json({ ok: true, email: user.email, message: 'Email verified. You can sign in now.' });
+  } catch (error) { next(error); }
+});
+app.post('/api/auth/verify-email/resend', async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Enter a valid email address.' });
+    }
+    // Always the same answer and cooldown for known and unknown addresses, so
+    // this endpoint cannot be used to discover which emails have accounts.
+    const cooldownSeconds = Math.ceil(RESEND_COOLDOWN_MS / 1000);
+    const generic = {
+      ok: true,
+      cooldownSeconds,
+      message: 'If that account is waiting for verification, a new link is on its way.'
+    };
+
+    const user = await findUserByEmail(email);
+    if (!user || isEmailVerified(user)) return res.json(generic);
+
+    const issued = await issueVerificationToken({ email, userId: user._id, enforceCooldown: false });
+    if (issued.throttled) return res.json({ ...generic, cooldownSeconds: issued.retryAfter });
+
+    try {
+      await sendVerificationEmail({ req, email, token: issued.token });
+    } catch (error) {
+      // Do not leave a token behind for an email that was never delivered:
+      // otherwise an immediate retry would be reported as throttled.
+      await clearVerificationTokens(email).catch(() => {});
+      console.error('Verification email failed:', error.message);
+      return res.status(503).json({ error: 'We could not send the verification email. Try again shortly.' });
+    }
+    res.json(generic);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/auth/otp/verify', async (req, res, next) => {
+  try {
+    const record = await verifyCode({
+      challengeId: req.body?.challengeId, code: req.body?.code, purposes: ['signup', 'login']
+    });
+    const user = await findUserByEmail(record.email);
+    if (!user) return res.status(400).json({ error: 'This code is no longer valid. Request a new one.' });
+    if (record.purpose === 'signup') {
+      if (!isEmailVerified(user)) await markEmailVerified(user);
+      await ensureStarterWorkspace(user);
+    }
+    const device = requestDevice(req);
+    if (device.id) await trustDevice(user, device.id, device.label);
+    res.json(await startSessionFor(user));
+  } catch (error) { next(error); }
+});
+app.post('/api/auth/otp/resend', async (req, res, next) => {
+  try {
+    const previous = await findCodeByChallenge(req.body?.challengeId);
+    if (!previous || previous.purpose === 'reset') return res.status(400).json({ error: 'Request a new code from the sign-in screen.' });
+    const user = await findUserByEmail(previous.email);
+    if (!user) return res.status(400).json({ error: 'This code is no longer valid. Sign in again.' });
+    let challengeId;
+    try {
+      // The previous code still exists here, so the one-minute cooldown applies.
+      challengeId = await issueAuthChallenge(user, previous.purpose);
+    } catch (error) {
+      if (isAuthError(error)) throw error;
+      console.error('Verification email failed:', error.message);
+      throw createAuthError(503, 'We could not send the email. Check the mail server settings and try again.');
+    }
+    await discardCode(previous.challengeId);
+    res.json({ ok: true, challengeId });
   } catch (error) { next(error); }
 });
 app.post('/api/auth/signout', requireAuth, async (req, res, next) => {
@@ -816,27 +1148,42 @@ app.delete('/api/boards/:id/members/:memberId', requireAuth, async (req, res, ne
 app.post('/api/auth/reset-password/request', async (req, res, next) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
-    const user = memoryUsers.get(email) || (mongoReady && await User.findOne({ email }));
-    const response = { ok: true, message: 'If an account exists, reset instructions have been sent.' };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    // Unknown addresses get a challenge too, so the response cannot be used to
+    // discover which emails have accounts.
+    const { challengeId, code } = await issueCode({ email, purpose: 'reset' });
+    const user = await findUserByEmail(email);
     if (user) {
-      const token = createResetToken(user._id);
-      if (process.env.NODE_ENV === 'test') response.resetToken = token;
+      try {
+        await sendCodeEmail({ email, purpose: 'reset', code });
+      } catch (error) {
+        console.error('Password reset email failed:', error.message);
+        return res.status(503).json({ error: 'We could not send the reset email. Check the mail server settings and try again.' });
+      }
     }
-    res.json(response);
+    res.json({
+      ok: true,
+      challengeId,
+      message: 'If an account exists for that email, a 6-digit code is on its way. It expires in 10 minutes.'
+    });
   } catch (error) { next(error); }
 });
-app.post('/api/auth/reset-password', async (req, res, next) => {
+app.post('/api/auth/reset-password/confirm', async (req, res, next) => {
   try {
-    const { token, password } = req.body || {};
+    const { challengeId, code, password } = req.body || {};
     validatePassword(password);
-    const record = consumeResetToken(token);
-    if (!record) return res.status(400).json({ error: 'The reset token is invalid or expired.' });
-    let user = [...memoryUsers.values()].find((item) => String(item._id) === record.userId);
-    if (!user && mongoReady) user = await User.findById(record.userId).select('+passwordHash');
-    if (!user) return res.status(400).json({ error: 'The reset token is invalid or expired.' });
-    user.passwordHash = await hashPassword(password);
-    if (memoryUsers.has(user.email)) memoryUsers.set(user.email, user);
-    else await User.updateOne({ _id: user._id }, { $set: { passwordHash: user.passwordHash, authSessions: [] } });
+    const record = await verifyCode({ challengeId, code, purposes: ['reset'] });
+    const user = await findUserByEmail(record.email);
+    if (!user) return res.status(400).json({ error: 'This code is no longer valid. Request a new one.' });
+    const passwordHash = await hashPassword(password);
+    // A reset code proves control of the mailbox, so the address counts as
+    // verified. Every session and remembered device is revoked: the next
+    // sign-in asks for a code again.
+    if (mongoReady) {
+      await User.updateOne({ _id: user._id }, { $set: { passwordHash, authSessions: [], trustedDevices: [], emailVerified: true } });
+    } else {
+      memoryUsers.set(user.email, { ...(memoryUsers.get(user.email) || user), passwordHash, trustedDevices: [], emailVerified: true });
+    }
     await revokeAllSessionsForUser(user._id);
     res.json({ ok: true });
   } catch (error) { next(error); }
@@ -895,17 +1242,17 @@ app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
   try {
     const sprint = await authorizedSprint(req, res);
     if (!sprint) return;
-    const tasks = await store.listBySprint(sprintId(sprint));
-    res.json((await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean));
+    // Authorized sprints are owner-scoped, so their tasks are the owner's too.
+    res.json((await store.listBySprint(sprintId(sprint))).map(taskView));
   } catch (error) { next(error); }
 });
 app.get('/api/backlog', requireAuth, async (req, res, next) => {
   try {
     // Sprints are owner-scoped, so an owner-scoped query is what keeps the Product
     // Backlog consistent with the sprint list (and avoids loading other developers' rows).
-    const tasks = await store.listWithoutSprint(userId(req));
-    const accessible = (await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean);
-    res.json(sortBacklog(accessible));
+    // Owner-scoped query: every returned task already belongs to the caller, so
+    // no per-task access check (and no extra query per row) is needed.
+    res.json(sortBacklog(await store.listWithoutSprint(userId(req))).map(taskView));
   } catch (error) { next(error); }
 });
 app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
@@ -919,7 +1266,7 @@ app.post('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
     if (blocked) return res.status(409).json({ error: blocked });
     // Entering a sprint always lands in To Do, never in a later stage.
     const updated = await store.update(key, { sprintId: sprintId(sprint), status: SPRINT_ENTRY_STATUS });
-    res.status(201).json(updated);
+    res.status(201).json(taskView(updated));
   } catch (error) { next(error); }
 });
 app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) => {
@@ -938,17 +1285,23 @@ app.delete('/api/sprints/:id/tasks/:key', requireAuth, async (req, res, next) =>
 
 app.get('/api/tasks', requireAuth, async (req, res, next) => {
   try {
-    const tasks = await store.list();
     const board = req.query.boardId ? await authorizedBoard({ ...req, params: { id: req.query.boardId } }, res) : await defaultBoardFor(req);
-    if (!board) return res.json([]);
-    res.json((await Promise.all(tasks.map(async (task) => String(task.boardId || '') === boardId(board) && (await canAccess(task, req)) ? task : null))).filter(Boolean));
+    // authorizedBoard has already answered for a missing or forbidden board.
+    if (!board) { if (!res.headersSent) res.json([]); return; }
+    // Query this board's tasks directly. The previous version loaded every task
+    // in the database and then re-checked access per task (an N+1 query storm
+    // and a full collection scan on a shared database).
+    res.json((await store.listByBoard(boardId(board))).map(taskView));
   } catch (error) { next(error); }
 });
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
     const board = req.body.boardId ? await authorizedBoard({ ...req, params: { id: req.body.boardId } }, res) : await defaultBoardFor(req);
-    if (!board) return res.status(404).json({ error: 'Create a board before adding tasks.' });
+    if (!board) {
+      if (!res.headersSent) res.status(404).json({ error: 'Create a board before adding tasks.' });
+      return;
+    }
     let sprint = null;
     if (req.body.sprintId) {
       sprint = await sprintStore.find(req.body.sprintId, userId(req));
@@ -956,16 +1309,25 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
       const blocked = sprintAcceptsBacklogItem(sprint, { sprintId: null, ownerId: userId(req), boardId: boardId(board) });
       if (blocked) return res.status(409).json({ error: blocked });
     }
-    let key;
-    do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+    if (req.body.assigneeId !== undefined && req.body.assigneeId !== null && String(req.body.assigneeId) !== userId(req)) {
+      return res.status(400).json({ error: 'You can only assign tasks to yourself.' });
+    }
+    const dueRaw = String(req.body.dueDate || '').trim();
+    const due = dueRaw ? parseDueDateInput(dueRaw) : { date: null, reason: null };
+    if (due.reason) throw createAuthError(400, `Due date "${dueRaw}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
+    const dueDateValue = due.date ? due.date.toISOString().slice(0, 10) : null;
+    const key = await newTaskKey();
     const task = await store.create({
       key, ownerId: userId(req), boardId: boardId(board), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
       status: sprint ? SPRINT_ENTRY_STATUS : req.body.status || BACKLOG_STATUS, priority: req.body.priority || 'medium',
-      labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
-      dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: sprint ? sprintId(sprint) : null, storyPoints: req.body.storyPoints || 0,
+      labels: [...new Set(req.body.labels || [])], assignee: req.body.assignee ? String(req.body.assignee).trim().slice(0, 120) : (req.body.assigneeId && String(req.body.assigneeId) === String(userId(req)) ? String(req.user?.name || '').slice(0, 120) || 'Unassigned' : 'Unassigned'),
+      assigneeId: req.body.assigneeId || null,
+      dueDate: dueDateValue, sprintId: sprint ? sprintId(sprint) : null, storyPoints: req.body.storyPoints || 0, estimateHours: Math.max(0, Math.min(1000, Number(req.body.estimateHours) || 0)),
       comments: [], attachments: [], dependencies: []
     });
-    res.status(201).json(task);
+    const now = new Date();
+    await writeTaskHistory(task._id, sprint ? sprintId(sprint) : null, null, task.status, userId(req), now);
+    res.status(201).json(taskView(task));
   } catch (error) { next(error); }
 });
 app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
@@ -980,6 +1342,20 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     }
     const updates = taskUpdates(req.body);
     delete updates.sprintId;
+    if (updates.assigneeId !== undefined && updates.assigneeId !== null && String(updates.assigneeId) !== String(userId(req))) {
+      return res.status(400).json({ error: 'You can only assign tasks to yourself.' });
+    }
+    if (updates.dueDate !== undefined) {
+      const converted = parseDueDateInput(String(updates.dueDate));
+      if (converted.reason) throw createAuthError(400, `Due date "${updates.dueDate}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
+      updates.dueDate = converted.date ? converted.date.toISOString().slice(0, 10) : null;
+    }
+    // Clearing the assignee must also clear the display name, or the card keeps
+    // showing whoever used to own it.
+    if (updates.assigneeId === null) updates.assignee = 'Unassigned';
+    if (updates.estimateHours !== undefined) {
+      updates.estimateHours = Math.max(0, Math.min(1000, Number(updates.estimateHours) || 0));
+    }
     if (updates.status !== undefined && task.sprintId && !isPermittedSprintStatusChange(task.status, updates.status)) {
       return res.status(409).json({
         error: `A sprint task cannot move directly from ${statusLabel(task.status)} to ${statusLabel(updates.status)}.`
@@ -988,7 +1364,17 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (updates.title !== undefined) updates.title = updates.title.trim();
     if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
     if (updates.labels) updates.labels = [...new Set(updates.labels)];
-    res.json(await store.update(task.key, updates));
+    if (updates.status !== undefined && updates.status !== task.status) {
+      const now = new Date();
+      // Only the lifecycle fields are needed; spreading a Mongoose document
+      // would drop the persisted timestamps and reset startedAt on every move.
+      const lifecycle = applyStatusLifecycle({ startedAt: task.startedAt, completedAt: task.completedAt }, updates.status, now);
+      if (lifecycle.startedAt !== task.startedAt) updates.startedAt = lifecycle.startedAt;
+      if (lifecycle.completedAt !== task.completedAt) updates.completedAt = lifecycle.completedAt;
+      updates.updatedAt = lifecycle.updatedAt;
+      await writeTaskHistory(task._id, task.sprintId, task.status, updates.status, userId(req), now);
+    }
+    res.json(taskView(await store.update(task.key, updates)));
   } catch (error) { next(error); }
 });
 app.delete('/api/tasks/:key', requireAuth, async (req, res, next) => {
@@ -996,6 +1382,63 @@ app.delete('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (!await authorizedTask(req, res)) return;
     const result = await store.remove(req.params.key);
     res.json({ ok: result.deletedCount === 1 });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/tasks/:key/history', requireAuth, async (req, res, next) => {
+  try {
+    const task = await authorizedTask(req, res);
+    if (!task) return;
+    const history = mongoReady
+      ? await TaskHistory.find({ taskId: task._id }).sort({ at: 1 }).lean()
+      : memoryTaskHistory.filter((h) => h.taskId === String(task._id)).sort((a, b) => new Date(a.at) - new Date(b.at));
+    res.json(history.map((h) => ({ from: h.from, to: h.to, actorId: h.actorId, at: h.at })));
+  } catch (error) { next(error); }
+});
+
+// One-off, idempotent backfill of legacy free-text due dates and assignee names.
+// Destructive collection-level operations stay out of the request handlers, and
+// only an admin may trigger it.
+app.post('/api/admin/migrate-tasks', requireAuth, requireRole('admin'), async (_req, res, next) => {
+  try { res.json(await migrateLegacyFields()); } catch (error) { next(error); }
+});
+
+app.delete('/api/tasks/:key/history', requireAuth, async (req, res, next) => {
+  try {
+    const task = await authorizedTask(req, res);
+    if (!task) return;
+    if (req.role !== 'admin') return res.status(403).json({ error: 'Only admins can clear history.' });
+    if (mongoReady) {
+      await TaskHistory.deleteMany({ taskId: task._id });
+    } else {
+      memoryTaskHistory = memoryTaskHistory.filter((h) => h.taskId !== String(task._id));
+    }
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/teams/:id/history', requireAuth, async (req, res, next) => {
+  try {
+    const id = String(req.params.id || '');
+    if (!/^[a-zA-Z0-9_-]{8,}$/.test(id)) {
+      return res.status(400).json({ error: 'Invalid team id.' });
+    }
+    // Sprint ids double as team ids in this schema, so ownership of the sprint is
+    // the membership check. Without it any signed-in user could read another
+    // team's task audit trail by guessing an id.
+    const sprint = await sprintStore.find(id, userId(req));
+    if (!sprint) return res.status(404).json({ error: 'Team not found.' });
+    // A task keeps the history it earned before it joined the sprint, so the
+    // team trail is "entries tagged with this team" plus every entry of a task
+    // that now lives in it. Otherwise moving a task into a sprint would hide
+    // its earlier transitions from the team.
+    const teamTaskIds = (await store.listBySprint(id)).map((task) => String(task._id));
+    const history = mongoReady
+      ? await TaskHistory.find({ $or: [{ teamId: id }, { taskId: { $in: teamTaskIds } }] }).sort({ at: 1 }).lean()
+      : memoryTaskHistory
+        .filter((h) => h.teamId === id || teamTaskIds.includes(h.taskId))
+        .sort((a, b) => new Date(a.at) - new Date(b.at));
+    res.json(history.map((h) => ({ from: h.from, to: h.to, actorId: h.actorId, at: h.at })));
   } catch (error) { next(error); }
 });
 
@@ -1154,8 +1597,7 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
       });
       const created = [];
       for (const item of requestedTasks) {
-        let key;
-        do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+        const key = await newTaskKey();
         created.push(await store.create({
           key,
           ownerId: userId(req),
@@ -1245,8 +1687,7 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
       tasks: plannedTasks,
       createBoard: boardStore.create,
       createTask: async (task) => {
-        let key;
-        do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+        const key = await newTaskKey();
         return store.create({
           key,
           ownerId,
@@ -1289,19 +1730,36 @@ app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Attachment is invalid or too large.' });
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
   if (isAuthError(error)) return res.status(error.status).json({ error: error.message });
+  // A malformed id or badly typed field is the client's mistake, not a server fault.
+  if (error?.name === 'CastError' || error?.name === 'ValidationError') {
+    return res.status(400).json({ error: 'One or more fields contained an invalid value.' });
+  }
   console.error('Request error:', error.message);
   res.status(500).json({ error: 'An unexpected server error occurred.' });
 });
 
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../../frontend/dist')));
-  app.get('*', (_req, res) => res.sendFile(path.join(__dirname, '../../frontend/dist/index.html')));
+  const distDir = path.join(__dirname, '../../frontend/dist');
+  app.use(express.static(distDir));
+  // Express 5 rejects the bare "*" route (path-to-regexp throws at startup), so
+  // the single-page fallback is a plain middleware instead.
+  app.use((_req, res) => res.sendFile(path.join(distDir, 'index.html')));
 }
 
-export { app, connectMongo, memoryTasks, sessions };
-connectMongo()
-  .then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)))
-  .catch((error) => {
-    console.error(error.message);
-    process.exitCode = 1;
+// The in-process suite (eventsApi.test.js) awaits this to learn the ephemeral
+// port it bound; running the server normally just awaits the same listen.
+const serverStarted = connectMongo().then(() => new Promise((resolve, reject) => {
+  const server = app.listen(port, () => {
+    console.log(`LeadAI API listening on http://localhost:${port}`);
+    resolve(server);
   });
+  server.on('error', reject);
+}));
+
+export { app, connectMongo, memoryTasks, sessions, store, serverStarted };
+serverStarted.catch((error) => {
+  // A failed boot must terminate the process (a successful Mongo connection
+  // would otherwise keep the event loop alive after a port clash).
+  console.error(error.message);
+  process.exit(1);
+});

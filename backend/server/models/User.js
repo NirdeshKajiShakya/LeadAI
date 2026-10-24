@@ -20,8 +20,18 @@ const userSchema = new mongoose.Schema({
     default: 'member'
   },
   authSessions: [{ type: String }],
-  resetToken: { type: String },
-  resetTokenExpiresAt: { type: Date }
+  // New accounts start unverified and only receive a board once the emailed
+  // code is confirmed. Older accounts have no field and hydrate as true.
+  emailVerified: { type: Boolean, default: true },
+  // Browsers that already passed the emailed sign-in check. Only a hash of the
+  // browser's device id is stored (see auth.js).
+  trustedDevices: [{
+    _id: false,
+    deviceHash: { type: String, required: true },
+    label: { type: String, default: '', maxlength: 120 },
+    trustedAt: { type: Date, default: Date.now },
+    lastSeenAt: { type: Date, default: Date.now }
+  }]
 }, { timestamps: true });
 
 export const User = mongoose.model('User', userSchema);

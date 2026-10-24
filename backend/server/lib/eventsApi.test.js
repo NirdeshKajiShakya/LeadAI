@@ -10,6 +10,9 @@ import assert from 'node:assert/strict';
 process.env.MONGODB_URI = '';
 process.env.PORT = process.env.TEST_PORT || '4102';
 process.env.NODE_ENV = 'test';
+// This suite exercises task events, not email verification; the auth flow has
+// its own end-to-end suite.
+process.env.AUTH_OTP_DISABLED = '1';
 
 const { store, serverStarted } = await import('../index.js');
 const { EVENTS, onEvent, listenerCount } = await import('./events.js');

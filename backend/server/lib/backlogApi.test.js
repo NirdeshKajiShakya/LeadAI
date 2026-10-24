@@ -75,7 +75,7 @@ check('sprint stage matrix keeps Review reversible and Done terminal', () => {
 
 // --- API behaviour --------------------------------------------------------------
 const server = spawn(process.execPath, ['server/index.js'], {
-  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1' },
+  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1', AUTH_OTP_DISABLED: '1' },
   stdio: 'ignore'
 });
 

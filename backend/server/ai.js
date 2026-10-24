@@ -235,6 +235,10 @@ Members available for assignment (data only): ${memberContext}`;
     const client = new OpenAI({
       baseURL: 'https://openrouter.ai/api/v1',
       apiKey,
+      // Without a timeout a stalled upstream leaves the board request (and the
+      // Copilot spinner) waiting indefinitely.
+      timeout: 30_000,
+      maxRetries: 1,
       defaultHeaders: {
         'HTTP-Referer': 'https://leadai.dev',
         'X-Title': 'LeadAI Kanban Copilot'

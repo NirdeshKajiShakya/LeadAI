@@ -39,7 +39,7 @@ async function api(path, { token, ...options } = {}) {
 function serverProcess() {
   const child = spawn(process.execPath, ['server/index.js'], {
     cwd: backendRoot,
-    env: { ...process.env, PORT: String(PORT), MONGODB_URI: uri, ALLOW_MEMORY_DB: 'false', NODE_ENV: 'test' },
+    env: { ...process.env, PORT: String(PORT), MONGODB_URI: uri, ALLOW_MEMORY_DB: 'false', NODE_ENV: 'test', AUTH_OTP_DISABLED: '1' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let output = '';
