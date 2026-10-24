@@ -89,7 +89,8 @@ export async function createUser({ email, password, name, role = 'member', email
     passwordHash,
     name: String(name || '').trim().slice(0, 80) || normalizedEmail,
     role: role === 'admin' ? 'member' : role,
-    emailVerified: emailVerified !== false
+    emailVerified: emailVerified !== false,
+    skills: []
   };
   if (!databaseReady) {
     if (memoryUsers.has(normalizedEmail)) throw createAuthError(409, 'An account with this email already exists.');

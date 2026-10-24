@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, CalendarDays, Check, ChevronRight, Link2, Loader2,
-  Mail, MapPin, Pencil, RefreshCw, Upload, X
+  Mail, MapPin, Minus, Pencil, Plus, RefreshCw, Search, Upload, X
 } from 'lucide-react';
 import { formatDateRange } from './sprintDates.js';
 
@@ -10,6 +10,39 @@ const statusLabels = { backlog: 'Backlog', todo: 'To do', progress: 'In progress
 const AVATAR_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 const AVATAR_MAX_DATA_URL = 105_000;
 const USERNAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
+
+const SKILL_CATEGORIES = [
+  {
+    id: 'frontend',
+    title: 'Frontend',
+    skills: ['React', 'TypeScript', 'Next.js', 'Tailwind CSS', 'Vue', 'Angular', 'Svelte', 'JavaScript', 'HTML/CSS']
+  },
+  {
+    id: 'backend',
+    title: 'Backend',
+    skills: ['Node.js', 'Python', 'Go', 'Java', 'Ruby', 'PHP', 'C#', 'Rust', 'GraphQL', 'REST APIs']
+  },
+  {
+    id: 'devops',
+    title: 'DevOps / Infrastructure',
+    skills: ['Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'Terraform', 'CI/CD', 'Linux', 'Nginx', 'Redis']
+  },
+  {
+    id: 'ai-ml',
+    title: 'AI & ML',
+    skills: ['AI/LLMs', 'Machine Learning', 'PyTorch', 'TensorFlow', 'LangChain', 'Prompt Engineering', 'Computer Vision', 'RAG']
+  },
+  {
+    id: 'data',
+    title: 'Data & Databases',
+    skills: ['SQL', 'PostgreSQL', 'MongoDB', 'MySQL', 'GraphQL', 'Elasticsearch', 'Cassandra', 'DynamoDB']
+  },
+  {
+    id: 'pm',
+    title: 'Project Management',
+    skills: ['Agile/Scrum', 'Kanban', 'Jira', 'Git', 'System Design', 'Technical Writing', 'Product Management']
+  }
+];
 
 function initialsOf(name = '') {
   const parts = String(name).trim().split(/\s+/).filter(Boolean);
@@ -109,14 +142,353 @@ function StateMessage({ error, onRetry, children }) {
   </div></section>;
 }
 
+function SkillsSection({ skills, onManage }) {
+  const safeSkills = Array.isArray(skills) ? skills : [];
+
+  return (
+    <section className="profile-section skills-section" aria-labelledby="profile-skills-heading">
+      <div className="skills-card">
+        <div className="skills-view-header">
+          <div>
+            <h2 id="profile-skills-heading">Skills &amp; Expertise</h2>
+            <p>Select the technical skills and methodologies you work with.</p>
+          </div>
+          <button type="button" className="skills-view-edit-button" onClick={onManage}>
+            Edit Skills
+          </button>
+        </div>
+        <div className="skills-view-tags">
+          {safeSkills.length > 0 ? (
+            safeSkills.map((skill) => (
+              <button key={skill} type="button" className="skill-view-tag" aria-label={`Manage ${skill} skill`} onClick={() => onManage(skill)}>
+                {skill}
+              </button>
+            ))
+          ) : (
+            <p className="skills-view-empty">No skills added yet. Select skills below to showcase your technical background.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SkillManager({ skills, onSave, onCancel }) {
+  const safeSkills = Array.isArray(skills) ? skills : [];
+  const allSkills = SKILL_CATEGORIES.flatMap((category) => category.skills);
+  const [selectedSkills, setSelectedSkills] = useState([...safeSkills]);
+  const [query, setQuery] = useState('');
+  const [customSkill, setCustomSkill] = useState('');
+  const [customSkills, setCustomSkills] = useState(safeSkills.filter((skill) => !allSkills.includes(skill)));
+
+  const filtered = allSkills.filter((skill) => skill.toLowerCase().includes(query.toLowerCase()));
+
+  function toggleSkill(skill) {
+    setSelectedSkills((prev) => (prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]));
+  }
+
+  function addCustomSkill(event) {
+    event.preventDefault();
+    const name = customSkill.trim();
+    if (!name || customSkills.includes(name) || allSkills.includes(name)) {
+      setCustomSkill('');
+      return;
+    }
+    setCustomSkills([...customSkills, name]);
+    setSelectedSkills((prev) => [...prev, name]);
+    setCustomSkill('');
+  }
+
+  function removeCustomSkill(skill) {
+    setCustomSkills(customSkills.filter((s) => s !== skill));
+    setSelectedSkills((prev) => prev.filter((s) => s !== skill));
+  }
+
+  const finalSkills = selectedSkills;
+
+  return (
+    <section className="profile-section skills-section skill-manager" aria-labelledby="profile-skills-manager-heading">
+      <header className="profile-card-head skills-header">
+        <div>
+          <h2 id="profile-skills-manager-heading">Skills &amp; Expertise</h2>
+          <p>Select the technical skills and methodologies you work with.</p>
+        </div>
+        <button type="button" className="link-button skills-cancel-button" onClick={onCancel}>
+          <X size={14} /> Cancel
+        </button>
+      </header>
+
+      <div className="skills-manager-body">
+        <label className="skills-search-label" htmlFor="skills-search">
+          <Search size={14} aria-hidden="true" /><span className="visually-hidden">Search skills</span>
+        </label>
+        <input
+          id="skills-search"
+          className="skills-search-input"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search skills…"
+          aria-label="Search skills"
+        />
+
+        <div className="skills-category-list">
+          {SKILL_CATEGORIES.map((category) => {
+            const categorySkills = category.skills.filter((skill) => skill.toLowerCase().includes(query.toLowerCase()));
+            if (categorySkills.length === 0) return null;
+            return (
+              <div key={category.id} className="skills-category">
+                <h3 className="skills-category-title">{category.title}</h3>
+                <ul className="skills-list">
+                  {categorySkills.map((skill) => {
+                    const checked = selectedSkills.includes(skill);
+                    return (
+                      <li key={skill} className="skills-list-item">
+                        <button
+                          type="button"
+                          className={`skills-checkbox ${checked ? 'is-checked' : ''}`}
+                          aria-checked={checked}
+                          onClick={() => toggleSkill(skill)}
+                        >
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+                          <span>{skill}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="skills-custom-section">
+          <h3 className="skills-category-title">Custom skills</h3>
+          <form onSubmit={addCustomSkill} className="skills-custom-form" noValidate>
+            <input
+              className="skills-custom-input"
+              value={customSkill}
+              onChange={(event) => setCustomSkill(event.target.value)}
+              placeholder="Add a custom skill…"
+              aria-label="Add a custom skill"
+            />
+            <button type="submit" className="skills-custom-add"><Plus size={14} /></button>
+          </form>
+          {customSkills.length > 0 && (
+            <ul className="skills-list skills-custom-list">
+              {customSkills.map((skill) => (
+                <li key={skill} className="skills-list-item skills-list-item-custom">
+                  <span className="skills-label">{skill}</span>
+                  <button type="button" className="skills-remove" aria-label={`Remove ${skill}`} onClick={() => removeCustomSkill(skill)}>
+                    <Minus size={12} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="skills-selected-summary">
+          <strong>{finalSkills.length} selected</strong>
+          <p className="skills-selected-hint">Changes are saved when you save your profile.</p>
+        </div>
+
+        <footer className="profile-form-actions skills-manager-footer">
+          <button type="button" className="secondary-button" onClick={onCancel}>Cancel</button>
+          <button type="button" className="primary-button" onClick={() => onSave(finalSkills)}><Check size={15} /> Done</button>
+        </footer>
+      </div>
+    </section>
+  );
+}
+
+function SkillsEditModal({ open, skills, onSave, onCancel }) {
+  const safeSkills = Array.isArray(skills) ? skills : [];
+  const allSkills = SKILL_CATEGORIES.flatMap((category) => category.skills);
+  const [selectedSkills, setSelectedSkills] = useState([...safeSkills]);
+  const [query, setQuery] = useState('');
+  const [customSkill, setCustomSkill] = useState('');
+  const [customSkills, setCustomSkills] = useState(safeSkills.filter((skill) => !allSkills.includes(skill)));
+
+  function toggleSkill(skill) {
+    setSelectedSkills((prev) => (prev.includes(skill) ? prev.filter((s) => s !== skill) : [...prev, skill]));
+  }
+
+  function addCustomSkill(event) {
+    event.preventDefault();
+    const name = customSkill.trim();
+    if (!name || customSkills.includes(name) || allSkills.includes(name)) {
+      setCustomSkill('');
+      return;
+    }
+    setCustomSkills([...customSkills, name]);
+    setSelectedSkills((prev) => [...prev, name]);
+    setCustomSkill('');
+  }
+
+  function removeCustomSkill(skill) {
+    setCustomSkills(customSkills.filter((s) => s !== skill));
+    setSelectedSkills((prev) => prev.filter((s) => s !== skill));
+  }
+
+  const finalSkills = selectedSkills;
+
+  return (
+    <div className={`skills-edit-overlay${open ? ' is-open' : ''}`} onClick={onCancel}>
+      <div className="skills-edit-modal" onClick={(event) => event.stopPropagation()}>
+        <div className="skills-edit-header">
+          <div>
+            <h2 className="skills-edit-title">Skills &amp; Expertise</h2>
+            <p className="skills-edit-subtitle">Select the technical skills and methodologies you work with.</p>
+          </div>
+          <button type="button" className="skills-edit-close" onClick={onCancel} aria-label="Close skills editor">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="skills-edit-search">
+          <div className="skills-edit-search-wrapper">
+            <Search size={16} aria-hidden="true" className="skills-edit-search-icon" />
+            <input
+              id="skills-edit-search"
+              className="skills-edit-search-input"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search skills…"
+              aria-label="Search skills"
+              autoFocus
+            />
+          </div>
+        </div>
+
+        <div className="skills-edit-body">
+          {SKILL_CATEGORIES.map((category) => {
+            const categorySkills = category.skills.filter((skill) => skill.toLowerCase().includes(query.toLowerCase()));
+            if (categorySkills.length === 0) return null;
+            return (
+              <div key={category.id} className="skills-edit-category">
+                <h3 className="skills-edit-category-title">{category.title}</h3>
+                <div className="skills-edit-grid">
+                  {categorySkills.map((skill) => {
+                    const checked = selectedSkills.includes(skill);
+                    return (
+                      <button
+                        key={skill}
+                        type="button"
+                        className={`skills-edit-card${checked ? ' is-active' : ''}`}
+                        aria-checked={checked}
+                        onClick={() => toggleSkill(skill)}
+                      >
+                        <span className="skills-edit-card-name">{skill}</span>
+                        {checked && <span className="skills-edit-check" aria-hidden="true">&#10003;</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+
+          <div className="skills-edit-category">
+            <h3 className="skills-edit-category-title">Custom skills</h3>
+            <form onSubmit={addCustomSkill} className="skills-edit-custom-form" noValidate>
+              <input
+                className="skills-edit-custom-input"
+                value={customSkill}
+                onChange={(event) => setCustomSkill(event.target.value)}
+                placeholder="Add a custom skill…"
+                aria-label="Add a custom skill"
+              />
+              <button type="submit" className="skills-edit-custom-add"><Plus size={14} /></button>
+            </form>
+            {customSkills.length > 0 && (
+              <div className="skills-edit-grid skills-edit-custom-grid">
+                {customSkills.map((skill) => {
+                  const checked = selectedSkills.includes(skill);
+                  return (
+                    <button
+                      key={skill}
+                      type="button"
+                      className={`skills-edit-card skills-edit-card-custom${checked ? ' is-active' : ''}`}
+                      aria-checked={checked}
+                      onClick={() => removeCustomSkill(skill)}
+                    >
+                      <span className="skills-edit-card-name">{skill}</span>
+                      <span className="skills-edit-remove" aria-label={`Remove ${skill}`}>
+                        <Minus size={12} />
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="skills-edit-footer">
+          <button type="button" className="skills-edit-btn-secondary" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="skills-edit-btn-primary" onClick={() => onSave(finalSkills)}>
+            Save Changes <Check size={14} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ProfilePage({ token, navigate }) {
   const { data, loading, error, reload } = useProfile(token);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+  const [pendingSkills, setPendingSkills] = useState([]);
+
+  function closeSkillsModal() {
+    setIsClosing(true);
+    setTimeout(() => {
+      setIsClosing(false);
+      setIsEditModalOpen(false);
+    }, 220);
+  }
+
+  // Keyboard listener (Escape to close). Must run before any conditional return
+  // so hook order stays identical across loading/loaded renders.
+  useEffect(() => {
+    if (!isEditModalOpen) return;
+    function onKeyDown(event) {
+      if (event.key === 'Escape') closeSkillsModal();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [isEditModalOpen]);
 
   if (loading || error) return <StateMessage error={error} onRetry={reload}>{loading ? 'Loading your profile…' : ''}</StateMessage>;
+  if (!data || !data.profile) return <StateMessage error="Profile data is not available." onRetry={reload} />;
 
   const { profile, stats, recentTasks, sprint } = data;
-  const displayName = profile.name || profile.email.split('@')[0];
+  const displayName = profile.name || profile.email?.split('@')[0] || 'User';
+  const userSkills = profile.skills || [];
   const sprintState = sprint?.current?.state;
+
+  function handleSkillsSave(nextSkills) {
+    const skills = Array.isArray(nextSkills) ? nextSkills : [];
+    console.log("Saving skills:", skills);
+    setPendingSkills(skills);
+    request('/api/profile', token, {
+      method: 'PATCH',
+      body: JSON.stringify({ skills })
+    })
+      .then((payload) => {
+        reload();
+        console.log("Skills saved successfully:", payload.profile.skills);
+      })
+      .catch((saveError) => {
+        console.error("Failed to save skills:", saveError);
+      })
+      .finally(() => {
+        closeSkillsModal();
+      });
+  }
 
   return <section className="profile-page">
     <nav className="profile-crumbs" aria-label="Breadcrumb"><span>Account</span><ChevronRight size={12} aria-hidden="true" /><strong>Profile</strong></nav>
@@ -144,6 +516,22 @@ export function ProfilePage({ token, navigate }) {
           {profile.website && <div><dt><Link2 size={14} aria-hidden="true" /><span className="visually-hidden">Website</span></dt><dd><a href={profile.website} target="_blank" rel="noreferrer noopener">{websiteLabel(profile.website)}</a></dd></div>}
           <div><dt><CalendarDays size={14} aria-hidden="true" /><span className="visually-hidden">Joined</span></dt><dd>Joined {joinedLabel(profile.createdAt)}</dd></div>
         </dl>
+
+        <SkillsSection
+          skills={userSkills}
+          onManage={() => {
+            setPendingSkills(userSkills);
+            setIsEditModalOpen(true);
+          }}
+        />
+        {(isEditModalOpen || isClosing) && (
+          <SkillsEditModal
+            open={isEditModalOpen}
+            skills={pendingSkills}
+            onSave={handleSkillsSave}
+            onCancel={closeSkillsModal}
+          />
+        )}
       </aside>
 
       <div className="profile-main">
@@ -210,7 +598,8 @@ function emptyForm(profile) {
     bio: profile.bio || '',
     location: profile.location || '',
     website: profile.website || '',
-    avatar: profile.avatar || ''
+    avatar: profile.avatar || '',
+    skills: profile.skills || []
   };
 }
 
@@ -257,6 +646,11 @@ async function compressAvatar(file) {
 function ProfileForm({ profile, token, navigate, onUserChange }) {
   const [baseline, setBaseline] = useState(() => emptyForm(profile));
   const [form, setForm] = useState(baseline);
+  const [skillsEditing, setSkillsEditing] = useState(false);
+
+  function removeSkill(skill) {
+    setForm((current) => ({ ...current, skills: Array.isArray(current.skills) ? current.skills.filter((s) => s !== skill) : [] }));
+  }
   const [fieldErrors, setFieldErrors] = useState({});
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
@@ -452,6 +846,40 @@ function ProfileForm({ profile, token, navigate, onUserChange }) {
         </div>
       </section>
 
+      {skillsEditing ? (
+        <SkillManager
+          skills={form.skills}
+          onSave={(nextSkills) => {
+            setForm((current) => ({ ...current, skills: nextSkills }));
+            setSkillsEditing(false);
+          }}
+          onCancel={() => setSkillsEditing(false)}
+        />
+      ) : (
+        <section className="profile-card skills-section" aria-labelledby="profile-skills-heading">
+          <header className="profile-card-head skills-header">
+            <div>
+              <h2 id="profile-skills-heading">Skills &amp; Expertise</h2>
+              <p>Select the technical skills and methodologies you work with.</p>
+            </div>
+            <button type="button" className="link-button skills-manage-button" onClick={() => setSkillsEditing(true)}>
+              <Pencil size={14} /> Manage skills
+            </button>
+          </header>
+          <div className="skills-tags">
+            {form.skills && form.skills.length > 0 ? (
+              form.skills.map((skill) => (
+                <button key={skill} type="button" className="skill-tag" aria-label={`Remove ${skill} skill`} onClick={() => removeSkill(skill)}>
+                  {skill}<X size={12} />
+                </button>
+              ))
+            ) : (
+              <p className="skills-empty">No skills added yet. Select skills below to showcase your technical background.</p>
+            )}
+          </div>
+        </section>
+      )}
+
       <section className="profile-card" aria-labelledby="profile-account-heading">
         <div className="profile-card-head">
           <h2 id="profile-account-heading">Account</h2>
@@ -485,5 +913,6 @@ export function ProfileEditPage({ token, navigate, onUserChange }) {
   const { data, loading, error, reload } = useProfile(token);
 
   if (loading || error) return <StateMessage error={error} onRetry={reload}>{loading ? 'Loading your profile…' : ''}</StateMessage>;
+  if (!data || !data.profile) return <StateMessage error="Profile data is not available." onRetry={reload} />;
   return <ProfileForm key={data.profile._id} profile={data.profile} token={token} navigate={navigate} onUserChange={onUserChange} />;
 }

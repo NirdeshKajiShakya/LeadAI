@@ -33,7 +33,7 @@ import {
   RESEND_COOLDOWN_MS
 } from './lib/emailVerification.js';
 import { sendMail } from './lib/email.js';
-import { chatWithContext, MAX_MESSAGE_LENGTH } from './ai.js';
+import { chatWithContext, MAX_MESSAGE_LENGTH, findBestSkilledMember, pickRandomMember } from './ai.js';
 import {
   setOverride, removeOverride, clearOverrides, getAllEffective
 } from './lib/envConfig.js';
@@ -584,7 +584,8 @@ async function boardMembers(board) {
   return members.filter(Boolean).map((member) => ({
     id: String(member._id),
     name: String(member.name || member.email),
-    email: String(member.email)
+    email: String(member.email),
+    skills: Array.isArray(member.skills) ? member.skills : []
   }));
 }
 function resolveBoardAssignee(value, members) {
@@ -702,6 +703,7 @@ function profileView(user) {
     location: value.location || '',
     website: value.website || '',
     avatar: value.avatar || '',
+    skills: Array.isArray(value.skills) ? value.skills : [],
     role: value.role || 'member',
     createdAt: value.createdAt || null,
     updatedAt: value.updatedAt || null
@@ -762,6 +764,12 @@ function profileUpdates(body) {
     if (updates.avatar && (updates.avatar.length > AVATAR_MAX_LENGTH || !avatarIsValid(updates.avatar))) {
       throw createAuthError(400, 'Avatar must be a PNG, JPEG, or WebP image of 80 KB or less.');
     }
+  }
+  if (body.skills !== undefined) {
+    if (!Array.isArray(body.skills) || body.skills.length > 20 || body.skills.some((skill) => typeof skill !== 'string' || !skill.trim() || skill.trim().length > 50)) {
+      throw createAuthError(400, 'Skills must be an array of up to 20 non-empty strings, each 50 characters or fewer.');
+    }
+    updates.skills = body.skills.map((skill) => skill.trim()).filter(Boolean);
   }
   return updates;
 }
@@ -1591,8 +1599,26 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
     const result = await chatWithContext(message, boardTasks, columns, members);
     if (result.action?.type === 'create' || result.action?.type === 'create_many') {
       const requestedTasks = result.action.type === 'create' ? [result.action] : result.action.tasks;
+      const assignmentNotes = [];
       requestedTasks.forEach((item) => {
         validateTaskInput(item, false);
+        const requested = String(item.assignee || 'Unassigned').trim();
+        if (!requested || requested.toLowerCase() === 'unassigned') {
+          // Skill-based assignment: match task labels/title/description against member skills.
+          const skilled = findBestSkilledMember(item, members);
+          if (skilled) {
+            item.assignee = skilled.name;
+            assignmentNotes.push(`Assigned “${item.title}” to ${skilled.name} (skill match).`);
+          } else {
+            const random = pickRandomMember(members);
+            if (random) {
+              item.assignee = random.name;
+              assignmentNotes.push(`Assigned “${item.title}” randomly to ${random.name} (no skill match found).`);
+            } else {
+              item.assignee = 'Unassigned';
+            }
+          }
+        }
         item.assignee = resolveBoardAssignee(item.assignee, members);
       });
       const created = [];
@@ -1618,7 +1644,9 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
       }
       result.action = { type: 'created_many', keys: created.map((item) => item.key) };
       result.matchedTask = created.length === 1 ? { key: created[0].key, title: created[0].title, columnName: columns.find((column) => column.id === created[0].status).label } : null;
-      result.reply = `Created ${created.length} tasks on the board: ${created.map((item) => `#${item.key} “${item.title}”`).join(', ')}.`;
+      let replyText = `Created ${created.length} tasks on the board: ${created.map((item) => `#${item.key} “${item.title}”`).join(', ')}.`;
+      if (assignmentNotes.length) replyText += ' ' + assignmentNotes.join(' ');
+      result.reply = replyText;
     } else if (result.action?.type === 'update' || result.action?.type === 'update_many') {
       const requestedUpdates = result.action.type === 'update' ? [result.action] : result.action.updates;
       const prepared = requestedUpdates.map((item) => {
@@ -1660,7 +1688,8 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
     const members = [{
       id: ownerId,
       name: String(req.user.name || req.user.email),
-      email: String(req.user.email)
+      email: String(req.user.email),
+      skills: Array.isArray(req.user.skills) ? req.user.skills : []
     }];
     const result = await chatWithContext(planningMessage(input.goal, input.name), [], BOARD_COLUMNS, members);
     const plannedTasks = tasksFromAiResult(result);
@@ -1672,9 +1701,22 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
     }
 
     // Validate everything before creating the board, so bad AI output cannot
-    // leave an empty board behind.
+    // leave an empty board behind. Apply skill-based assignment to unassigned tasks.
+    const assignmentNotes = [];
     for (const task of plannedTasks) {
       validateTaskInput(task, false);
+      const requested = String(task.assignee || 'Unassigned').trim();
+      if (!requested || requested.toLowerCase() === 'unassigned') {
+        const skilled = findBestSkilledMember(task, members);
+        if (skilled) {
+          task.assignee = skilled.name;
+          assignmentNotes.push(`Assigned “${task.title}” to ${skilled.name} (skill match).`);
+        } else {
+          const random = pickRandomMember(members);
+          task.assignee = random ? random.name : 'Unassigned';
+          if (random) assignmentNotes.push(`Assigned “${task.title}” randomly to ${random.name} (no skill match found).`);
+        }
+      }
       task.assignee = resolveBoardAssignee(task.assignee, members);
     }
 
@@ -1716,11 +1758,13 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
     res.status(201).json({
       board: { id: boardId(board), name: board.name, isOwner: true },
       tasksCreated: created.length,
+      assignmentNotes,
       tasks: created.map((task) => ({
         key: task.key,
         title: task.title,
         status: task.status,
-        priority: task.priority
+        priority: task.priority,
+        assignee: task.assignee
       }))
     });
   } catch (error) { next(error); }

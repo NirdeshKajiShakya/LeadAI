@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown,
-  ChevronRight, Filter, LayoutGrid, List, Menu, MoreHorizontal, PanelLeftClose,
+  Activity, AlertTriangle, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, ChevronLeft,
+  ChevronRight, CircleHelp, Filter, LayoutGrid, List, Menu, MessageSquare, MoreHorizontal, PanelLeftClose,
   PanelLeftOpen, Pencil, Plus, Search, Settings2, Sparkles, Target, UserRound, Users, X,
   Zap, LoaderCircle, Clock3, Mail, Shield, Trash2
 } from 'lucide-react';
