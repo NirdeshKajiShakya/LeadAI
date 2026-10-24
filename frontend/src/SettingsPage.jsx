@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, KeyRound, LogOut, Save, Settings2, Shield, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, KeyRound, LogOut, Save, Settings2, Shield, X, Zap } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -59,6 +59,8 @@ export default function SettingsPage({ token, user, navigate, onSignOut }) {
       </section>
 
       <PasswordCard token={token} email={user?.email} onSignOut={onSignOut} />
+
+      <PersonalKeyCard token={token} />
 
       {isAdmin && <ServerPanel token={token} />}
     </section>
@@ -186,6 +188,110 @@ function PasswordCard({ token, email, onSignOut }) {
             </button>
             <button type="submit" className="primary-button" disabled={busy || code.trim().length < 6 || password.length < 8}>
               {busy ? 'Changing…' : 'Change password'}
+            </button>
+          </footer>
+        </form>
+      )}
+    </section>
+  );
+}
+
+// Personal AI key: any member can bring their own OpenRouter key. It is only
+// used when the workspace has no key configured, and only a hint ever comes
+// back from the server.
+function PersonalKeyCard({ token }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    request('/api/settings/user-key', token)
+      .then((payload) => { if (active) setData(payload); })
+      .catch((loadError) => { if (active) setError(loadError.message); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [token]);
+
+  async function save(nextKey) {
+    setBusy(true);
+    setError('');
+    setSaved('');
+    try {
+      const payload = await request('/api/settings/user-key', token, {
+        method: 'PUT',
+        body: JSON.stringify({ openrouterApiKey: nextKey }),
+      });
+      setData(payload);
+      setKey('');
+      setSaved(payload.configured ? 'Personal API key saved.' : 'Personal API key removed.');
+    } catch (saveError) {
+      setError(saveError.message || 'Could not save your key.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="profile-card" aria-labelledby="settings-personal-key-heading">
+      <div className="profile-card-head">
+        <h2 id="settings-personal-key-heading"><Zap size={15} /> Personal AI key</h2>
+        <p>
+          Use your own OpenRouter key for Copilot and AI board generation. It is only used when
+          the workspace has no key configured, and it is never displayed again after saving.
+        </p>
+      </div>
+
+      {loading && <p role="status">Loading your key…</p>}
+      {error && (
+        <div className="form-error" role="alert">
+          {error}
+          <button type="button" onClick={() => setError('')} aria-label="Dismiss error"><X size={13} /></button>
+        </div>
+      )}
+      {saved && <p className="settings-saved" role="status"><CheckCircle2 size={13} /> {saved}</p>}
+      {data?.workspaceKeyConfigured && (
+        <p className="settings-saved" role="status">
+          <AlertTriangle size={13} /> A workspace key is configured, so it is currently used instead of yours.
+        </p>
+      )}
+
+      {data && (
+        <form
+          onSubmit={(event) => { event.preventDefault(); save(key); }}
+          className="profile-fields"
+        >
+          <div className="field field-full">
+            <label htmlFor="settings-personal-openrouter-key">
+              {data.configured ? 'Replace your OpenRouter API key' : 'OpenRouter API key'}
+            </label>
+            <input
+              id="settings-personal-openrouter-key"
+              type="password"
+              value={key}
+              onChange={(event) => setKey(event.target.value)}
+              placeholder={data.configured ? `Current key ${data.keyHint} — enter a new one to replace it` : 'sk-or-v1-…'}
+              autoComplete="new-password"
+              spellCheck="false"
+              aria-describedby="settings-personal-openrouter-key-help"
+            />
+            <div className="field-foot">
+              <small id="settings-personal-openrouter-key-help">
+                Get a key from openrouter.ai. Stored on the server and only ever shown as a hint.
+              </small>
+            </div>
+          </div>
+          <footer className="profile-form-actions">
+            {data.configured && (
+              <button type="button" className="secondary-button" onClick={() => save('')} disabled={busy}>
+                Remove key
+              </button>
+            )}
+            <button type="submit" className="primary-button" disabled={busy || !key.trim()}>
+              {busy ? <><Save className="spin" size={15} /> Saving…</> : <><Save size={15} /> Save key</>}
             </button>
           </footer>
         </form>

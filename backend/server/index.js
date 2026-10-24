@@ -24,7 +24,7 @@ import {
   requireAuth, requireRole, invalidateSession, revokeAllSessionsForUser, validatePassword,
   memoryUsers, hashPassword, setDatabaseReady,
   refreshSessionUser, serializeUser, sessions,
-  findUserByEmail, findUserById,
+  findUserByEmail, findUserById, findUserAiKey, updateUserAiKey,
   isEmailVerified, markEmailVerified, normalizeDeviceId, isTrustedDevice, trustDevice
 } from './auth.js';
 import { issueCode, verifyCode, findCodeByChallenge, findActiveChallenge, discardCode } from './lib/authCodes.js';
@@ -565,7 +565,9 @@ async function buildDashboard(req) {
     boards: boardCards,
     priorityTasks,
     activeSprint,
-    ai: { configured: Boolean(process.env.OPENROUTER_API_KEY?.trim()) }
+    // Copilot is available when either the workspace key (env or Settings
+    // override) or the member's personal key exists.
+    ai: { configured: Boolean(getAllEffective().OPENROUTER_API_KEY?.trim()) || Boolean(await findUserAiKey(userId(req))) }
   };
 }
 
@@ -870,7 +872,7 @@ app.get('/api/dashboard/summary', requireAuth, async (req, res, next) => {
 // Server configuration is operator data. Members may see whether it is
 // configured; only an admin can change it. Secrets are never returned, so a
 // compromised member session cannot exfiltrate the database URI or AI key.
-function settingsView(canEdit) {
+function settingsView(canEdit, personalKeyConfigured = false) {
   const effective = getAllEffective();
   const uri = String(effective.MONGODB_URI || '');
   const key = String(effective.OPENROUTER_API_KEY || '');
@@ -884,13 +886,57 @@ function settingsView(canEdit) {
     mongodbHost: canEdit ? /^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?([^/?]+)/.exec(uri)?.[1] || null : null,
     openrouterConfigured: Boolean(key),
     openrouterKeyHint: canEdit && key ? `••••${key.slice(-4)}` : '',
-    openrouterModel: effective.OPENROUTER_MODEL || ''
+    openrouterModel: effective.OPENROUTER_MODEL || '',
+    // The member's own key (if any) explains why Copilot works for them even
+    // when the workspace has no key. Only its presence is shared, never a hint.
+    personalKeyConfigured
   };
 }
 
-app.get('/api/settings/env', requireAuth, (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  res.json(settingsView(req.role === 'admin'));
+app.get('/api/settings/env', requireAuth, async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(settingsView(req.role === 'admin', Boolean(await findUserAiKey(userId(req)))));
+  } catch (error) { next(error); }
+});
+
+// Personal AI key: any signed-in member may store their own OpenRouter key.
+// It is used only when the workspace has no key, is never returned to the
+// browser (only a hint), and can be cleared by sending an empty value.
+const AI_KEY_MAX_LENGTH = 256;
+
+app.get('/api/settings/user-key', requireAuth, async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    const key = await findUserAiKey(userId(req));
+    res.json({
+      configured: Boolean(key),
+      keyHint: key ? `••••${key.slice(-4)}` : '',
+      // A workspace key always wins; say so, so members are not confused about
+      // why their personal key seems ignored.
+      workspaceKeyConfigured: Boolean(getAllEffective().OPENROUTER_API_KEY)
+    });
+  } catch (error) { next(error); }
+});
+
+app.put('/api/settings/user-key', requireAuth, async (req, res, next) => {
+  try {
+    const raw = req.body?.openrouterApiKey;
+    if (raw !== undefined && typeof raw !== 'string') {
+      return res.status(400).json({ error: 'openrouterApiKey must be a string.' });
+    }
+    const key = String(raw || '').trim();
+    if (key.length > AI_KEY_MAX_LENGTH) {
+      return res.status(400).json({ error: `API key must be ${AI_KEY_MAX_LENGTH} characters or fewer.` });
+    }
+    await updateUserAiKey(userId(req), key);
+    res.json({
+      saved: true,
+      configured: Boolean(key),
+      keyHint: key ? `••••${key.slice(-4)}` : '',
+      workspaceKeyConfigured: Boolean(getAllEffective().OPENROUTER_API_KEY)
+    });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/settings/env', requireAuth, requireRole('admin'), async (req, res, next) => {
@@ -1596,7 +1642,10 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
 
     const columns = BOARD_COLUMNS;
 
-    const result = await chatWithContext(message, boardTasks, columns, members);
+    const result = await chatWithContext(message, boardTasks, columns, members, {
+      // Personal key fallback: only read when the workspace has no key.
+      userApiKey: getAllEffective().OPENROUTER_API_KEY ? '' : await findUserAiKey(userId(req))
+    });
     if (result.action?.type === 'create' || result.action?.type === 'create_many') {
       const requestedTasks = result.action.type === 'create' ? [result.action] : result.action.tasks;
       const assignmentNotes = [];
@@ -1677,9 +1726,11 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
     const input = normalizeBoardGenerationRequest(req.body || {});
     if (input.error) return res.status(400).json({ error: input.error });
 
-    if (!process.env.OPENROUTER_API_KEY?.trim()) {
+    // The workspace key wins; a member's personal key is the fallback.
+    const userApiKey = getAllEffective().OPENROUTER_API_KEY ? '' : await findUserAiKey(userId(req));
+    if (!getAllEffective().OPENROUTER_API_KEY?.trim() && !userApiKey) {
       return res.status(503).json({
-        error: 'AI board generation is not configured on this server. Add OPENROUTER_API_KEY to backend/.env and restart the API, or create a board manually.',
+        error: 'AI board generation is not configured on this server. Add OPENROUTER_API_KEY to backend/.env, set one in Settings, or create a board manually.',
         code: 'AI_NOT_CONFIGURED'
       });
     }
@@ -1691,7 +1742,7 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
       email: String(req.user.email),
       skills: Array.isArray(req.user.skills) ? req.user.skills : []
     }];
-    const result = await chatWithContext(planningMessage(input.goal, input.name), [], BOARD_COLUMNS, members);
+    const result = await chatWithContext(planningMessage(input.goal, input.name), [], BOARD_COLUMNS, members, { userApiKey });
     const plannedTasks = tasksFromAiResult(result);
     if (!plannedTasks.length) {
       return res.status(422).json({

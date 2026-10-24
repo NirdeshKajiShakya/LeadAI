@@ -54,6 +54,8 @@ export function serializeUser(user) {
   // Device hashes are as sensitive as a session token: a leaked one would let
   // someone skip the emailed sign-in code.
   delete value.trustedDevices;
+  // Personal AI keys never leave the server, in any shape.
+  delete value.openrouterApiKey;
   return value;
 }
 
@@ -247,4 +249,26 @@ export async function revokeAllSessionsForUser(userId) {
     if (String(session.user._id) === String(userId)) sessions.delete(token);
   });
   if (databaseReady) await User.updateOne({ _id: userId }, { $set: { authSessions: [] } });
+}
+
+// Personal AI keys are stored per user and never leave the server in any
+// shape. The field is select:false, so reads must ask for it explicitly.
+export async function findUserAiKey(id) {
+  if (!id) return '';
+  if (!databaseReady) {
+    const user = [...memoryUsers.values()].find((item) => String(item._id) === String(id));
+    return String(user?.openrouterApiKey || '').trim();
+  }
+  const user = await User.findById(id).select('+openrouterApiKey');
+  return String(user?.openrouterApiKey || '').trim();
+}
+
+export async function updateUserAiKey(id, key) {
+  const value = String(key || '').trim();
+  if (!databaseReady) {
+    const user = [...memoryUsers.values()].find((item) => String(item._id) === String(id));
+    if (user) user.openrouterApiKey = value;
+    return;
+  }
+  await User.updateOne({ _id: id }, { $set: { openrouterApiKey: value } });
 }

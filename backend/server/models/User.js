@@ -14,6 +14,9 @@ const userSchema = new mongoose.Schema({
   // Technical skills the member has listed on their profile (e.g. ["React", "Python", "Docker"]).
   // Used by the Copilot to suggest task assignments. Optional; defaults to an empty array.
   skills: { type: [String], default: [], trim: true },
+  // Optional personal OpenRouter key. Used only when the server has no key of
+  // its own. select:false keeps it out of ordinary queries, like passwordHash.
+  openrouterApiKey: { type: String, trim: true, maxlength: 256, default: '', select: false },
   // Small inline image (data URL, <= 80 KB decoded). Avoids a public upload directory
   // and keeps avatars in the shared database instead of one developer's disk.
   avatar: { type: String, default: '', maxlength: 110_000 },

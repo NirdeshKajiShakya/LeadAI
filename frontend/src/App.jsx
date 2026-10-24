@@ -103,7 +103,7 @@ function App() {
     let cancelled = false;
     fetch(`${API_BASE_URL}/api/settings/env`, { headers: { Authorization: `Bearer ${token}` } })
       .then((response) => (response.ok ? response.json() : null))
-      .then((payload) => { if (!cancelled && payload) setAiConfigured(Boolean(payload.openrouterConfigured)); })
+      .then((payload) => { if (!cancelled && payload) setAiConfigured(Boolean(payload.openrouterConfigured || payload.personalKeyConfigured)); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [token]);
