@@ -152,12 +152,13 @@
    ===================================================================== */
 :root { font-family: 'DM Sans', sans-serif; color: #e1e5ee; background: #0c1117; font-synthesis: none; --bg: #0c1117; --surface: #141a22; --surface-2: #19212a; --surface-3: #202a35; --line: #27313d; --muted: #84909f; --text: #e1e5ee; --primary: #8c86ff; --cyan: #48c8f1; --green: #4be1a0; --danger: #ff817b; --radius: 7px; }
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 body { margin: 0; min-width: 320px; background: radial-gradient(circle at 60% -20%, #1b2333 0, transparent 38%), var(--bg); }
 button, input, select, textarea { font: inherit; }
 button { border: 0; cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .app-shell { min-height: 100vh; }
-.topbar { height: 58px; display: flex; align-items: center; gap: 25px; padding: 0 20px; background: #10161d; border-bottom: 1px solid #202a34; position: sticky; top: 0; z-index: 5; }
+.topbar { height: 58px; display: flex; align-items: center; gap: 25px; padding: 0 20px; background: #10161d; border-bottom: 1px solid #202a34; position: sticky; top: 0; z-index: 40; isolation: isolate; }
 .brand-lockup { display: flex; align-items: center; gap: 9px; min-width: 155px; font-family: 'Space Grotesk'; font-size: 18px; color: #f2f4f8; }
 .logo-mark { display: flex; align-items: end; gap: 3px; height: 20px; }
 .logo-mark span { display: block; width: 4px; border-radius: 3px; background: var(--primary); }
@@ -179,8 +180,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .profile-avatar, .assignee i, .avatar-stack span { display: inline-grid; place-items: center; border-radius: 50%; font-size: 9px; font-weight: 700; color: #0b1520; background: var(--cyan); }
 .profile-avatar { position: relative; width: 27px; height: 27px; background: #d2a171; }
 .profile-avatar span { width: 7px; height: 7px; border-radius: 50%; background: var(--green); border: 1px solid #10161d; position: absolute; bottom: -1px; right: -1px; }
-.workspace-layout { display: flex; }
-.sidebar { width: 256px; flex: 0 0 256px; min-height: calc(100vh - 58px); border-right: 1px solid #202a34; background: #0e1217; padding: 14px 10px 0; display: flex; flex-direction: column; transition: width 300ms cubic-bezier(.2,.8,.2,1), min-width 300ms ease, flex-basis 300ms cubic-bezier(.2,.8,.2,1), padding 300ms ease; overflow-x: hidden; z-index: 10; }
+.workspace-layout { display: grid; grid-template-columns: 256px minmax(0, 1fr); align-items: start; transition: grid-template-columns 300ms cubic-bezier(.2,.8,.2,1); }
+.workspace-layout[data-sidebar-collapsed="true"] { grid-template-columns: 72px minmax(0, 1fr); }
+.workspace-layout > .main-content { grid-column: 2; }
+.sidebar { position: fixed; top: 58px; left: 0; z-index: 30; width: 256px; height: calc(100vh - 58px); min-height: 0; padding: 14px 10px 0; border-right: 1px solid #202a34; background: #0e1217; display: flex; flex-direction: column; transition: width 300ms cubic-bezier(.2,.8,.2,1), padding 300ms ease; overflow-x: hidden; overflow-y: auto; }
 .sidebar[data-collapsed="true"] { width: 72px; flex: 0 0 72px; min-width: 72px; padding: 14px 8px 0; }
 .nav-section { margin-bottom: 20px; }
 .nav-label, .eyebrow { text-transform: uppercase; color: #758190; letter-spacing: .08em; font-size: 9px; }
@@ -203,7 +206,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @keyframes sidebar-icon-enter { from { opacity: .4; transform: scale(.82) rotate(-12deg); } to { opacity: 1; transform: scale(1) rotate(0); } }
 .sidebar[data-collapsed="true"] .sidebar-footer { display: none; }
 .sidebar-footer { margin-top: auto; padding: 10px 6px; background: #0c1218; border-radius: 5px; font-size: 9px; color: #8894a1; opacity: 1; transition: opacity 150ms ease; }
-@media (prefers-reduced-motion: reduce) { .sidebar, .nav-item, .nav-item svg, .sidebar-collapse { transition-duration: 0.01ms !important; } .sidebar-collapse svg { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .workspace-layout, .sidebar, .nav-item, .nav-item svg, .sidebar-collapse { transition-duration: 0.01ms !important; } .sidebar-collapse svg { animation: none; } }
 .quota-copy, .ai-active { display: flex; justify-content: space-between; align-items: center; }
 .quota-copy strong { color: #e0e7ef; font-weight: 500; }
 .quota-bar { background: #26313c; height: 4px; margin: 8px 0 13px; border-radius: 3px; }
@@ -211,7 +214,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .ai-active { color: #aeb9c4; }
 .ai-active > span { width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 5px; }
 .ai-active svg { margin-left: auto; color: var(--green); }
-.main-content { min-width: 0; flex: 1; padding: 0 22px 30px; max-width: 1700px; }
+.main-content { min-width: 0; flex: 1; padding: 16px 22px 30px; max-width: 1700px; }
 .context-strip { display: flex; justify-content: space-between; gap: 18px; padding: 13px 0; border-bottom: 1px solid #202a34; }
 .breadcrumbs, .metric-badges, .metric span, .metric { display: flex; align-items: center; gap: 8px; }
 .breadcrumbs { font-size: 11px; color: #83909e; }
@@ -328,14 +331,22 @@ h1 span { font: 500 10px 'DM Sans'; color: #929dad; background: var(--surface-3)
 
 /* Old responsive rules (board / copilot parts removed) */
 @media (max-width: 1180px) { .control-bar { flex-wrap: wrap; } .view-controls { margin-left: 0; } }
-@media (max-width: 800px) { .topbar { padding: 0 12px; gap: 10px; } .brand-lockup { min-width: auto; } .workspace-picker { display: none; } .global-search { width: 150px; } .text-button, .signup-button { display: none; } .sidebar { width: 52px; flex-basis: 52px; padding: 13px 7px; } .sidebar .nav-label, .sidebar .nav-item span, .sidebar .nav-item em, .sidebar-footer { display: none; } .nav-item { justify-content: center; padding: 10px 4px; } .mobile-menu { display: none; } .main-content { padding: 0 12px 20px; } .context-strip, .page-heading, .velocity-panel { flex-direction: column; align-items: flex-start; } .metric-badges { justify-content: flex-start; } .heading-actions { flex-wrap: wrap; } .velocity-stats { width: 100%; flex-wrap: wrap; } .velocity-stats div { flex: 1; min-width: 115px; } .filter-search { width: 100%; } .avatar-stack { display: none; } }
+@media (max-width: 800px) { .topbar { padding: 0 12px; gap: 10px; } .brand-lockup { min-width: auto; } .workspace-picker { display: none; } .global-search { width: 150px; } .text-button, .signup-button { display: none; } .sidebar { width: 52px; flex-basis: 52px; padding: 13px 7px; } .sidebar .nav-label, .sidebar .nav-item span, .sidebar .nav-item em, .sidebar-footer { display: none; } .nav-item { justify-content: center; padding: 10px 4px; } .mobile-menu { display: none; } .main-content { padding: 16px 12px 20px; } .context-strip, .page-heading, .velocity-panel { flex-direction: column; align-items: flex-start; } .metric-badges { justify-content: flex-start; } .heading-actions { flex-wrap: wrap; } .velocity-stats { width: 100%; flex-wrap: wrap; } .velocity-stats div { flex: 1; min-width: 115px; } .filter-search { width: 100%; } .avatar-stack { display: none; } }
+@media (max-width: 800px) {
+  .workspace-layout,
+  .workspace-layout[data-sidebar-collapsed="true"] { grid-template-columns: 52px minmax(0, 1fr); }
+  .workspace-layout > .sidebar,
+  .workspace-layout > .sidebar[data-collapsed="true"] { width: 52px; min-width: 52px; flex-basis: 52px; }
+  .sidebar,
+  .sidebar[data-collapsed="true"] { top: 58px; height: calc(100vh - 58px); }
+}
 @media (max-width: 520px) { .topbar-actions { gap: 5px; } .global-search { display: none; } .page-heading h1 { font-size: 22px; } .heading-actions { width: 100%; } .heading-actions button { flex: 1; } .control-bar { align-items: stretch; } .view-controls { width: 100%; justify-content: flex-end; } .form-grid { grid-template-columns: 1fr; gap: 0; } }
 
 /* =====================================================================
    PART 3 - OLD: route pages, auth pages, task list view
    ===================================================================== */
 .brand-lockup { border: 0; background: transparent; text-align: left; }
-.route-page { min-height: calc(100vh - 58px); padding: 54px 3vw; }
+.route-page { min-height: calc(100vh - 58px); padding: 38px 3vw 54px; }
 .route-hero { max-width: 760px; padding-bottom: 28px; border-bottom: 1px solid var(--line); }
 .route-hero h1 { margin-bottom: 10px; }
 .route-hero p { color: var(--muted); font-size: 13px; max-width: 600px; }

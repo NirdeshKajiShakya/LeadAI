@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowRight, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
@@ -13,6 +13,8 @@ import AutomationsPage from './AutomationsPage.jsx';
 import { formatDate } from './formatDate.js';
 import SettingsPage from './SettingsPage.jsx';
 import SetupWizard from './SetupWizard.jsx';
+const LandingPage = lazy(() => import('./LandingPage.jsx'));
+const AuthExperience = lazy(() => import('./LandingPage.jsx').then((module) => ({ default: module.AuthExperience })));
 
 const columns = [
   { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
@@ -48,6 +50,7 @@ function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('leadai-session'));
   const [user, setUser] = useState(null);
   const [authMode, setAuthMode] = useState('signin');
+  const [authView, setAuthView] = useState(['/signin', '/signup'].includes(window.location.pathname));
   const [authError, setAuthError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [tasks, setTasks] = useState([]);
@@ -106,6 +109,7 @@ function App() {
   useEffect(() => {
     const handlePopState = () => {
       setPathname(window.location.pathname);
+      setAuthView(['/signin', '/signup'].includes(window.location.pathname));
       const boardIdFromUrl = new URLSearchParams(window.location.search).get('boardId');
       if (boardIdFromUrl) setActiveBoardId(boardIdFromUrl);
     };
@@ -204,6 +208,9 @@ function App() {
       // unreachable; the token will simply expire on the server.
     }
     sessionStorage.removeItem('leadai-session');
+    window.history.replaceState({}, '', '/');
+    setPathname('/');
+    setAuthView(false);
     setHomeSummary(null);
     setToken(null);
     setUser(null);
@@ -415,7 +422,7 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: form.get('email'), password: form.get('password'), name: form.get('name') })
+        body: JSON.stringify({ email: form.get('email'), password: form.get('password'), name: form.get('username') || form.get('name') })
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
@@ -425,17 +432,65 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
         return;
       }
       if (authMode === 'signup') {
-        setAuthMode('signin');
-        setAuthError('Account created. Sign in to continue.');
+        const signInResponse = await fetch(`${API_BASE_URL}/api/auth/signin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: form.get('email'), password: form.get('password') })
+        });
+        const signInPayload = await signInResponse.json().catch(() => null);
+        if (!signInResponse.ok) {
+          setAuthError(signInPayload?.error || `Account created, but sign-in failed (HTTP ${signInResponse.status}). Please sign in.`);
+          setAuthMode('signin');
+          window.history.replaceState({}, '', '/signin');
+          setPathname('/signin');
+          return;
+        }
+        sessionStorage.setItem('leadai-session', signInPayload.token);
+        setToken(signInPayload.token);
+        setAuthView(false);
+        window.history.replaceState({}, '', '/');
+        setPathname('/');
         return;
       }
       sessionStorage.setItem('leadai-session', payload.token);
       setToken(payload.token);
+      setAuthView(false);
+      window.history.replaceState({}, '', '/');
+      setPathname('/');
     } catch {
       setAuthError('Could not reach the server. Make sure the LeadAI API is running and try again.');
     } finally {
       setAuthBusy(false);
     }
+  }
+
+  function openAuth(mode) {
+    setAuthMode(mode);
+    setAuthError('');
+    setAuthView(true);
+    const nextPath = mode === 'signup' ? '/signup' : '/signin';
+    window.history.pushState({}, '', nextPath);
+    setPathname(nextPath);
+  }
+
+  function closeAuth() {
+    setAuthError('');
+    setAuthView(false);
+    window.history.pushState({}, '', '/');
+    setPathname('/');
+  }
+
+  if (!token && setupRequired && !systemStatusLoading && !systemStatusError) {
+    return <SetupWizard token={token} onComplete={() => setSetupRequired(false)} />;
+  }
+
+  if (!token) {
+    const requestedAuth = pathname === '/signin' || pathname === '/signup';
+    return <Suspense fallback={<main className="auth-screen"><div className="auth-panel"><div className="eyebrow">LeadAI workspace</div><h1>Getting your workspace ready</h1></div></main>}>
+      {authView || requestedAuth
+        ? <AuthExperience mode={requestedAuth ? (pathname === '/signup' ? 'signup' : 'signin') : authMode} onModeChange={(mode) => openAuth(mode)} onBack={closeAuth} error={authError} busy={authBusy} onSubmit={authenticate} />
+        : <LandingPage onAuth={openAuth} />}
+    </Suspense>;
   }
 
   if (systemStatusLoading) {
@@ -515,7 +570,7 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
         <button type="button" className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
       </div>
     </header>
-    <div className="workspace-layout">
+    <div className="workspace-layout" data-sidebar-collapsed={sidebarCollapsed}>
       <aside id="primary-navigation" className="sidebar" data-collapsed={sidebarCollapsed} aria-label="Primary navigation">
         <button className="sidebar-collapse" aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((prev) => !prev)}>
           {sidebarCollapsed ? <PanelLeftOpen key="open" size={18} strokeWidth={1.8} /> : <PanelLeftClose key="close" size={18} strokeWidth={1.8} />}
@@ -557,10 +612,6 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
 }
 
 function NavItem({ icon, label, active, badge, onClick }) { return <button className={`nav-item ${active ? 'active' : ''}`} title={label} aria-label={label} onClick={onClick}>{icon}<span>{label}</span>{badge && <em>{badge}</em>}</button>; }
-function AuthScreen({ mode, setMode, error, busy, onSubmit }) {
-  const signup = mode === 'signup';
-  return <main className="auth-screen"><div className="auth-panel"><div className="logo-mark"><span></span><span></span><span></span></div><div className="eyebrow">LeadAI workspace</div><h1>{signup ? 'Create your account' : 'Welcome back'}</h1><p>{signup ? 'Start shaping clearer work for your team.' : 'Sign in to continue to your sprint board.'}</p><form onSubmit={onSubmit}>{signup && <label>Name<input name="name" autoComplete="name" maxLength="80" /></label>}<label>Email<input name="email" type="email" autoComplete="email" required /></label><label>Password<input name="password" type="password" minLength="8" maxLength="128" autoComplete={signup ? 'new-password' : 'current-password'} required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button className="primary-button" type="submit" disabled={busy}>{busy ? 'Working...' : signup ? 'Create account' : 'Sign in'} {!busy && <ArrowRight size={15} />}</button></form><button className="auth-switch" onClick={() => setMode(signup ? 'signin' : 'signup')} disabled={busy}>{signup ? 'Already have an account? Sign in' : 'Need an account? Sign up'}</button></div></main>;
-}
 function Metric({ label, value, dot, icon }) { return <div className="metric"><span>{dot && <i className={`metric-dot ${dot}`}></i>}{icon}{label}</span><strong>{value}</strong></div>; }
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove, onEdit, onDelete }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
 function formatDue(value) {
