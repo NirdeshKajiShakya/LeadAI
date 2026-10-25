@@ -66,8 +66,25 @@ try {
     assert.ok(created.body.dueDate, 'dueDate present');
     assert.ok(!Number.isNaN(Date.parse(created.body.dueDate)), 'dueDate parses');
   });
+  const tomorrow = await api('/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Tomorrow task', dueDate: 'Tomorrow' })
+  });
+  check('creating with Tomorrow converts to a date-only value', () => {
+    assert.match(tomorrow.body.dueDate, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(new Date(`${tomorrow.body.dueDate}T00:00:00Z`).getTime() - Date.parse(created.body.dueDate), 86400000);
+  });
+  const pickerDate = await api('/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Picker date', dueDate: '2026-11-05' })
+  });
+  check('creating with a date-picker value preserves the calendar date', () => assert.equal(pickerDate.body.dueDate, '2026-11-05'));
   check('estimateHours is persisted', () => assert.equal(created.body.estimateHours, 6.5));
   const key = created.body.key;
+  const updatedDue = await api(`/tasks/${key}`, { method: 'PATCH', body: JSON.stringify({ dueDate: '2026-12-15' }) });
+  check('updating a task deadline preserves the date-only value', () => assert.equal(updatedDue.body.dueDate, '2026-12-15'));
+  const clearedDue = await api(`/tasks/${key}`, { method: 'PATCH', body: JSON.stringify({ dueDate: null }) });
+  check('null clears an optional deadline', () => assert.equal(clearedDue.body.dueDate, null));
 
   // ---- J1: creation writes a history entry ---------------------------------
   const history0 = await api(`/tasks/${key}/history`);

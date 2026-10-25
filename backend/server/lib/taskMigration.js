@@ -1,5 +1,6 @@
 import { Task } from '../models/Task.js';
 import { User } from '../models/User.js';
+import { isValidIsoDate, todayIsoDate } from './sprintDates.js';
 
 export const ALLOWED_STATUSES = ['backlog', 'todo', 'progress', 'review', 'done'];
 
@@ -69,7 +70,7 @@ export async function migrateTaskAssignee(task) {
 const MIGRATION_REFERENCE_DATE = '2026-10-19';
 
 function isoToDate(iso) {
-  if (!iso) return null;
+  if (!isValidIsoDate(iso)) return null;
   const d = new Date(`${iso}T00:00:00Z`);
   return Number.isNaN(d.getTime()) ? null : d;
 }
@@ -119,11 +120,11 @@ export function convertDueDate(legacy, todayIso = MIGRATION_REFERENCE_DATE) {
 
   if (text === '') return { date: null, reason: null };
 
-  if (text === 'Unscheduled' || text === 'UNSCHEDULED') {
+  if (text.toLowerCase() === 'unscheduled') {
     return { date: null, reason: null };
   }
 
-  if (text === 'Today') {
+  if (text.toLowerCase() === 'today') {
     return { date: new Date(`${todayIso}T00:00:00Z`), reason: null };
   }
 
@@ -134,6 +135,32 @@ export function convertDueDate(legacy, todayIso = MIGRATION_REFERENCE_DATE) {
   if (resolved) return { date: resolved, reason: null };
 
   return { date: null, reason: `cannot parse: ${text}` };
+}
+
+// Task deadlines are calendar dates, not timestamps. Relative labels are
+// accepted only at this boundary and are resolved using the server's local
+// calendar before being stored as UTC midnight.
+export function normalizeDueDate(raw, today = todayIsoDate()) {
+  if (raw === null || raw === undefined) return { date: null, reason: null };
+  const text = String(raw).trim();
+  if (!text) return { date: null, reason: null };
+
+  const base = new Date(`${today}T00:00:00Z`);
+  if (Number.isNaN(base.getTime()) || !isValidIsoDate(today)) {
+    return { date: null, reason: `invalid reference date: ${today}` };
+  }
+
+  const normalized = text.toLowerCase();
+  if (normalized === 'today') return { date: base, reason: null };
+  if (normalized === 'tomorrow') {
+    base.setUTCDate(base.getUTCDate() + 1);
+    return { date: base, reason: null };
+  }
+  if (normalized === 'this week') {
+    base.setUTCDate(base.getUTCDate() + ((7 - base.getUTCDay()) % 7));
+    return { date: base, reason: null };
+  }
+  return convertDueDate(text, today);
 }
 
 export async function migrateLegacyFields() {

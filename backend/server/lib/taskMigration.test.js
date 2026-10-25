@@ -2,7 +2,7 @@
 // functions, so no database is required.
 import assert from 'node:assert/strict';
 import {
-  ALLOWED_STATUSES, STATUS_CATEGORY, assertMappedStatus, statusCategory, convertDueDate
+  ALLOWED_STATUSES, STATUS_CATEGORY, assertMappedStatus, statusCategory, convertDueDate, normalizeDueDate
 } from './taskMigration.js';
 
 let passed = 0;
@@ -76,6 +76,19 @@ check('unparseable values are flagged, not silently dropped', () => {
   assert.equal(date, null);
   assert.match(reason, /^cannot parse: This week$/);
   assert.match(convertDueDate('whenever').reason, /cannot parse/);
+});
+
+check('relative API labels resolve to deterministic calendar dates', () => {
+  assert.equal(normalizeDueDate('Today', '2026-10-25').date.toISOString(), '2026-10-25T00:00:00.000Z');
+  assert.equal(normalizeDueDate('Tomorrow', '2026-10-25').date.toISOString(), '2026-10-26T00:00:00.000Z');
+  assert.equal(normalizeDueDate('This week', '2026-10-25').date.toISOString(), '2026-10-25T00:00:00.000Z');
+});
+
+check('invalid and malformed dates are rejected without fallback dates', () => {
+  assert.match(normalizeDueDate('2026-02-30', '2026-10-25').reason, /cannot parse/);
+  assert.match(normalizeDueDate('whenever', '2026-10-25').reason, /cannot parse/);
+  assert.equal(normalizeDueDate(null, '2026-10-25').date, null);
+  assert.equal(normalizeDueDate('', '2026-10-25').date, null);
 });
 
 console.log(`\n${passed} migration checks passed.`);

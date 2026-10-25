@@ -15,7 +15,7 @@ import {
   BACKLOG_STATUS, SPRINT_ENTRY_STATUS, isPermittedSprintStatusChange,
   sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
 } from './lib/taskTransitions.js';
-import { convertDueDate, migrateLegacyFields } from './lib/taskMigration.js';
+import { normalizeDueDate, migrateLegacyFields } from './lib/taskMigration.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
 import { connectDatabase, databaseStatus, reconnectDatabase } from './db.js';
 import { Board } from './models/Board.js';
@@ -620,7 +620,7 @@ function validateTaskInput(body, partial = false) {
   if (body.priority !== undefined && !allowedPriorities.includes(body.priority)) throw createAuthError(400, 'Invalid priority.');
   if (body.labels !== undefined && (!Array.isArray(body.labels) || body.labels.length > 10 || body.labels.some((label) => typeof label !== 'string' || !label.trim() || label.length > 40))) throw createAuthError(400, 'Labels must be non-empty text values.');
   if (body.assignee !== undefined && (typeof body.assignee !== 'string' || body.assignee.trim().length > 120)) throw createAuthError(400, 'Assignee must be text up to 120 characters.');
-  if (body.dueDate !== undefined && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
+  if (body.dueDate !== undefined && body.dueDate !== null && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
   if (body.sprintId !== undefined && (body.sprintId !== null && (typeof body.sprintId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.sprintId)))) throw createAuthError(400, 'Invalid sprint id.');
   if (body.assigneeId !== undefined && (body.assigneeId !== null && (typeof body.assigneeId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.assigneeId)))) throw createAuthError(400, 'Invalid assignee id.');
   if (body.storyPoints !== undefined && (!Number.isInteger(body.storyPoints) || body.storyPoints < 0 || body.storyPoints > 100)) throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
@@ -630,22 +630,6 @@ function validateTaskInput(body, partial = false) {
 // What a person can type into the due-date field. Relative words the API accepts
 // are resolved here; legacy values ("Oct 18", "Unscheduled") stay in
 // convertDueDate so the migration keeps its own, narrower contract.
-function parseDueDateInput(raw, today = todayIsoDate()) {
-  const text = String(raw || '').trim();
-  const normalized = text.toLowerCase();
-  const date = new Date(`${today}T00:00:00Z`);
-  if (normalized === 'today') return { date, reason: null };
-  if (normalized === 'tomorrow') {
-    date.setUTCDate(date.getUTCDate() + 1);
-    return { date, reason: null };
-  }
-  if (normalized === 'this week') {
-    date.setUTCDate(date.getUTCDate() + ((7 - date.getUTCDay()) % 7));
-    return { date, reason: null };
-  }
-  return convertDueDate(text, today);
-}
-
 function validTaskKey(key) { return typeof key === 'string' && /^KAN-[A-Z0-9]+$/i.test(key); }
 function taskUpdates(body) {
   return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'assigneeId', 'dueDate', 'sprintId', 'storyPoints', 'estimateHours'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
@@ -1367,7 +1351,7 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'You can only assign tasks to yourself.' });
     }
     const dueRaw = String(req.body.dueDate || '').trim();
-    const due = dueRaw ? parseDueDateInput(dueRaw) : { date: null, reason: null };
+    const due = normalizeDueDate(dueRaw);
     if (due.reason) throw createAuthError(400, `Due date "${dueRaw}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
     const dueDateValue = due.date ? due.date.toISOString().slice(0, 10) : null;
     const key = await newTaskKey();
@@ -1400,7 +1384,7 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'You can only assign tasks to yourself.' });
     }
     if (updates.dueDate !== undefined) {
-      const converted = parseDueDateInput(String(updates.dueDate));
+      const converted = normalizeDueDate(updates.dueDate);
       if (converted.reason) throw createAuthError(400, `Due date "${updates.dueDate}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
       updates.dueDate = converted.date ? converted.date.toISOString().slice(0, 10) : null;
     }
@@ -1683,7 +1667,11 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
           priority: item.priority,
           labels: [...new Set(item.labels || [])],
           assignee: item.assignee,
-          dueDate: item.dueDate || '',
+          dueDate: (() => {
+            const due = normalizeDueDate(item.dueDate);
+            if (due.reason) throw createAuthError(400, `Due date "${item.dueDate}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
+            return due.date ? due.date.toISOString().slice(0, 10) : null;
+          })(),
           sprintId: null,
           storyPoints: 0,
           comments: [],
@@ -1705,6 +1693,11 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
         const changes = { ...item.changes };
         if (changes.assignee !== undefined) changes.assignee = resolveBoardAssignee(changes.assignee, members);
         if (changes.labels) changes.labels = [...new Set(changes.labels)];
+        if (changes.dueDate !== undefined) {
+          const due = normalizeDueDate(changes.dueDate);
+          if (due.reason) throw createAuthError(400, `Due date "${changes.dueDate}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
+          changes.dueDate = due.date ? due.date.toISOString().slice(0, 10) : null;
+        }
         if (changes.title !== undefined) changes.title = changes.title.trim();
         return { task, changes };
       });
@@ -1791,7 +1784,11 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
           priority: task.priority || 'medium',
           labels: [...new Set(task.labels || [])],
           assignee: task.assignee || 'Unassigned',
-          dueDate: String(task.dueDate || '').slice(0, 40),
+          dueDate: (() => {
+            const due = normalizeDueDate(task.dueDate);
+            if (due.reason) throw createAuthError(400, `Due date "${task.dueDate}" could not be understood. Use a date like 2026-10-24, or Today, Tomorrow, This week, Unscheduled.`);
+            return due.date ? due.date.toISOString().slice(0, 10) : null;
+          })(),
           sprintId: null,
           storyPoints: Number.isInteger(task.storyPoints) ? task.storyPoints : 0,
           comments: [],

@@ -949,9 +949,10 @@ function TaskModal({ status, task, onClose, onSubmit, assignees }) {
   function chooseDueDate(value) {
     if (value === 'none') return setDueDate('');
     const date = new Date();
-    if (value === 'today') return setDueDate(date.toISOString().slice(0, 10));
+    const localIso = () => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    if (value === 'today') return setDueDate(localIso());
     date.setDate(date.getDate() + Number(value));
-    setDueDate(date.toISOString().slice(0, 10));
+    setDueDate(localIso());
   }
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <form ref={dialogRef} className="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title" onSubmit={onSubmit}>
@@ -967,4 +968,3 @@ function TaskModal({ status, task, onClose, onSubmit, assignees }) {
 }
 
 export default App;
-
