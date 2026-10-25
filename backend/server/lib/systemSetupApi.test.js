@@ -49,6 +49,13 @@ try {
   assert.equal(JSON.stringify(initialStatus.body).includes('test-secret-not-for-status'), false);
   assert.equal(JSON.stringify(initialStatus.body).includes('mongodb://'), false);
 
+  const configured = await api('/system/configure', null, {
+    method: 'POST',
+    body: JSON.stringify({ databaseMode: 'local', skipAI: true })
+  });
+  assert.equal(configured.status, 200);
+  assert.deepEqual(configured.body, { saved: true, setupRequired: false });
+
   const unauthorized = await api('/system/configure', null, {
     method: 'POST',
     body: JSON.stringify({ databaseMode: 'local', skipAI: true })
@@ -72,17 +79,23 @@ try {
   });
   assert.equal(invalid.status, 400);
 
-  const configured = await api('/system/configure', token, {
+  const configuredCloud = await api('/system/configure', token, {
     method: 'POST',
-    body: JSON.stringify({ databaseMode: 'local', skipAI: true })
+    body: JSON.stringify({
+      databaseMode: 'cloud',
+      mongodbUri: 'mongodb+srv://cluster.example?retryWrites=true',
+      openrouterApiKey: 'test-cloud-setup-key'
+    })
   });
-  assert.equal(configured.status, 200);
-  assert.deepEqual(configured.body, { saved: true, setupRequired: false });
+  assert.equal(configuredCloud.status, 200);
+  assert.deepEqual(configuredCloud.body, { saved: true, setupRequired: false });
+
   const finalStatus = await api('/system/status');
   assert.equal(finalStatus.body.setupRequired, false);
   assert.equal(finalStatus.body.mongodb.configured, true);
-  assert.equal(finalStatus.body.mongodb.usingLocalDefault, true);
+  assert.equal(finalStatus.body.mongodb.usingLocalDefault, false);
   assert.equal(finalStatus.body.mongodb.connected, false);
+  assert.equal(finalStatus.body.openrouter.configured, true);
   assert.equal(JSON.stringify(finalStatus.body).includes('mongodb://'), false);
   console.log('System setup API tests passed.');
 } finally {

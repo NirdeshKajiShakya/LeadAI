@@ -1,9 +1,9 @@
-// A missing or malformed MongoDB configuration must stop the API with a clear error.
-// The previous silent in-memory fallback is what made each developer see different data.
+// Invalid MongoDB schemes must stop the API with a clear error.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeMongoUri, parseDatabaseName } from '../db.js';
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -37,16 +37,12 @@ function check(label, fn) {
 
 console.log('database configuration checks\n');
 
-const missing = await start({ MONGODB_URI: '', ALLOW_MEMORY_DB: 'false', NODE_ENV: 'development' });
-check('missing MONGODB_URI exits instead of silently using memory', () => {
-  assert.equal(missing.code, 1);
-  assert.match(missing.output, /MONGODB_URI is not set/);
-});
-
-const nameless = await start({ MONGODB_URI: 'mongodb://127.0.0.1:27017', ALLOW_MEMORY_DB: 'false', NODE_ENV: 'development' });
-check('a URI without a database name is rejected', () => {
-  assert.equal(nameless.code, 1);
-  assert.match(nameless.output, /must name a database/);
+check('nameless MongoDB URIs receive a safe default database', () => {
+  assert.equal(normalizeMongoUri('mongodb://127.0.0.1:27017'), 'mongodb://127.0.0.1:27017/leadai_dev');
+  assert.equal(normalizeMongoUri('mongodb://127.0.0.1:27017/?retryWrites=true'), 'mongodb://127.0.0.1:27017/leadai_dev?retryWrites=true');
+  assert.equal(normalizeMongoUri('mongodb+srv://cluster.example?retryWrites=true'), 'mongodb+srv://cluster.example/leadai_dev?retryWrites=true');
+  assert.equal(normalizeMongoUri('mongodb://127.0.0.1:27017/custom'), 'mongodb://127.0.0.1:27017/custom');
+  assert.equal(parseDatabaseName('mongodb+srv://cluster.example'), 'leadai_dev');
 });
 
 const wrongScheme = await start({ MONGODB_URI: 'postgres://127.0.0.1:5432/leadai', ALLOW_MEMORY_DB: 'false', NODE_ENV: 'development' });

@@ -85,7 +85,7 @@ export default function SetupWizard({ token, onComplete }) {
                   autoComplete="off"
                   spellCheck="false"
                 />
-                <small>Include a database name in the URI. Keep this value private.</small>
+                <small>If omitted, the database name defaults to leadai_dev. Keep this value private.</small>
               </label>
             )}
             <p className="setup-footnote">Changing databases does not copy existing boards or accounts. Choose the database your workspace should use.</p>

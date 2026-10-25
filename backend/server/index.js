@@ -15,7 +15,7 @@ import {
   sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
 } from './lib/taskTransitions.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
-import { connectDatabase, databaseStatus, reconnectDatabase } from './db.js';
+import { connectDatabase, databaseStatus, normalizeMongoUri, parseDatabaseName, reconnectDatabase } from './db.js';
 import { Board } from './models/Board.js';
 import { TaskHistory } from './models/TaskHistory.js';
 import {
@@ -854,7 +854,10 @@ app.get('/api/system/status', (_req, res) => {
   });
 });
 
-app.post('/api/system/configure', requireAuth, async (req, res) => {
+app.post('/api/system/configure', (req, res, next) => {
+  if (!isSetupComplete()) return next();
+  requireAuth(req, res, next);
+}, async (req, res) => {
   const { databaseMode, mongodbUri, openrouterApiKey, skipAI } = req.body || {};
   if (!['local', 'cloud'].includes(databaseMode)) {
     return res.status(400).json({ error: 'Choose either the local default or a cloud MongoDB URI.' });
@@ -863,15 +866,15 @@ app.post('/api/system/configure', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Provide an OpenRouter API key or choose demo mode.' });
   }
 
-  const nextMongoUri = databaseMode === 'local'
+  const requestedMongoUri = databaseMode === 'local'
     ? 'mongodb://localhost:27017/leadai'
     : String(mongodbUri || '').trim();
-  if (!/^mongodb(?:\+srv)?:\/\//.test(nextMongoUri)) {
+  const nextMongoUri = normalizeMongoUri(requestedMongoUri);
+  if (!/^mongodb(?:\+srv)?:\/\//i.test(nextMongoUri)) {
     return res.status(400).json({ error: 'The MongoDB URI must start with mongodb:// or mongodb+srv://.' });
   }
-  const databaseName = /^mongodb(?:\+srv)?:\/\/[^/]*\/([^?]+)/.exec(nextMongoUri);
-  if (!databaseName?.[1]) {
-    return res.status(400).json({ error: 'The MongoDB URI must include a database name.' });
+  if (!parseDatabaseName(nextMongoUri)) {
+    return res.status(400).json({ error: 'Enter a valid MongoDB connection URI.' });
   }
 
   const previousMongoOverride = getOverride('MONGODB_URI');

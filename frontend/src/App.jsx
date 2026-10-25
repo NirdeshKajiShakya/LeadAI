@@ -76,6 +76,32 @@ function App() {
   const [homeSummary, setHomeSummary] = useState(null);
   const [homeAiFocus, setHomeAiFocus] = useState(0);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [systemStatusLoading, setSystemStatusLoading] = useState(true);
+  const [systemStatusError, setSystemStatusError] = useState('');
+  const [systemStatusRetry, setSystemStatusRetry] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setSystemStatusLoading(true);
+    setSystemStatusError('');
+    fetch(`${API_BASE_URL}/api/system/status`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`System status could not be checked (HTTP ${response.status}).`);
+        return response.json();
+      })
+      .then((status) => {
+        if (active) {
+          setSetupRequired(Boolean(status?.setupRequired));
+        }
+      })
+      .catch((error) => {
+        if (active) setSystemStatusError(error.message || 'System status could not be checked.');
+      })
+      .finally(() => {
+        if (active) setSystemStatusLoading(false);
+      });
+    return () => { active = false; };
+  }, [systemStatusRetry]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -86,14 +112,13 @@ function App() {
     window.addEventListener('popstate', handlePopState);
     const boardIdFromUrl = new URLSearchParams(window.location.search).get('boardId');
     if (boardIdFromUrl) setActiveBoardId(boardIdFromUrl);
+    if (systemStatusLoading || systemStatusError || setupRequired) {
+      return () => window.removeEventListener('popstate', handlePopState);
+    }
     if (!token) {
       setLoading(false);
       return () => window.removeEventListener('popstate', handlePopState);
     }
-    fetch(`${API_BASE_URL}/api/system/status`)
-      .then((response) => response.ok ? response.json() : null)
-      .then((status) => setSetupRequired(Boolean(status?.setupRequired)))
-      .catch(() => setSetupRequired(false));
     const authHeaders = { Authorization: `Bearer ${token}` };
     fetch(`${API_BASE_URL}/api/auth/current`, { headers: authHeaders })
       .then((response) => (response.ok ? response.json() : null))
@@ -108,11 +133,15 @@ function App() {
       .catch(() => setBoards([]));
     setLoading(false);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [token]);
+  }, [token, systemStatusLoading, systemStatusError, setupRequired]);
 
   useEffect(() => {
     let active = true;
     setTasks([]);
+    if (systemStatusLoading || systemStatusError || setupRequired) {
+      setLoading(false);
+      return () => { active = false; };
+    }
     if (!token || !activeBoardId) {
       setLoading(false);
       return () => { active = false; };
@@ -132,7 +161,7 @@ function App() {
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [token, activeBoardId]);
+  }, [token, activeBoardId, systemStatusLoading, systemStatusError, setupRequired]);
 
   useEffect(() => {
     if (!boards.length) {
@@ -409,6 +438,13 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
     }
   }
 
+  if (systemStatusLoading) {
+    return <main className="auth-screen"><div className="auth-panel"><div className="eyebrow">LeadAI workspace</div><h1>Preparing your workspace</h1><p>Checking whether first-time setup is needed…</p></div></main>;
+  }
+  if (systemStatusError) {
+    return <main className="auth-screen"><div className="auth-panel"><div className="eyebrow">LeadAI workspace</div><h1>Unable to check setup</h1><p>{systemStatusError}</p><button className="primary-button" type="button" onClick={() => setSystemStatusRetry((retry) => retry + 1)}>Try again <ArrowRight size={15} /></button></div></main>;
+  }
+  if (setupRequired) return <SetupWizard token={token} onComplete={() => setSetupRequired(false)} />;
   if (!token) return <AuthScreen mode={authMode} setMode={setAuthMode} error={authError} busy={authBusy} onSubmit={authenticate} />;
 
   async function sendCopilot(event) {
@@ -517,7 +553,6 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
         {boardDialog && <BoardDialog mode={boardDialog} name={boardName} setName={setBoardName} busy={boardBusy} onClose={() => setBoardDialog(null)} onSubmit={saveBoard} />}
       </main>
     </div>
-    {setupRequired && <SetupWizard token={token} onComplete={() => setSetupRequired(false)} />}
   </div>;
 }
 

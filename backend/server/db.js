@@ -18,11 +18,24 @@ export function databaseStatus() {
   };
 }
 
-// The database name is part of the connection string; refusing a URI without one
-// keeps the API from silently writing into whatever database the driver picks.
+export function normalizeMongoUri(uri, defaultDatabase = 'leadai_dev') {
+  const value = String(uri).trim();
+  const match = /^(mongodb(?:\+srv)?:\/\/[^/?]+)(\/[^?]*)?(\?.*)?$/i.exec(value);
+  if (!match) return value;
+  const [, authority, path = '', query = ''] = match;
+  if (path && path !== '/') return value;
+  return `${authority}/${defaultDatabase}${query}`;
+}
+
 export function parseDatabaseName(uri) {
-  const match = /^mongodb(?:\+srv)?:\/\/[^/]*\/([^?]+)/.exec(String(uri));
-  return match ? decodeURIComponent(match[1]) : null;
+  const normalizedUri = normalizeMongoUri(uri);
+  const match = /^mongodb(?:\+srv)?:\/\/[^/?#]+\/([^/?#]+)(?:\?.*)?$/i.exec(normalizedUri);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
 }
 
 export async function connectDatabase() {
@@ -38,13 +51,14 @@ export async function connectDatabase() {
   //   Tier 3: Local default fallback                         -> mongodb://localhost:27017/leadai
   const overrideUri = String(getEffective('MONGODB_URI')).trim();
   const envUri = String(process.env.MONGODB_URI || '').trim();
-  const uri = overrideUri || envUri || 'mongodb://localhost:27017/leadai';
+  const configuredUri = overrideUri || envUri || 'mongodb://localhost:27017/leadai';
+  const uri = normalizeMongoUri(configuredUri);
 
   let source = 'local default';
   if (overrideUri) source = 'user settings override';
   else if (envUri) source = 'environment variable';
 
-  if (!/^mongodb(\+srv)?:\/\//.test(uri)) {
+  if (!/^mongodb(\+srv)?:\/\//i.test(uri)) {
     throw new Error('MONGODB_URI must start with mongodb:// or mongodb+srv://.');
   }
   const name = parseDatabaseName(uri);
