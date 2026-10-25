@@ -1,6 +1,15 @@
 import mongoose from 'mongoose';
 
 export const USERNAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
+export const USERNAME_MIN_LENGTH = 3;
+export const USERNAME_MAX_LENGTH = 30;
+
+// Usernames are case-insensitive and always stored in one canonical form.
+// The unique sparse index on `username` makes the database the authority even
+// when two requests race each other.
+export function normalizeUsername(value) {
+  return String(value || '').trim().toLowerCase();
+}
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, trim: true, lowercase: true },

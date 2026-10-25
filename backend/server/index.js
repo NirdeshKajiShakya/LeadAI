@@ -16,7 +16,7 @@ import {
   sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
 } from './lib/taskTransitions.js';
 import { normalizeDueDate, migrateLegacyFields } from './lib/taskMigration.js';
-import { User, USERNAME_PATTERN } from './models/User.js';
+import { User } from './models/User.js';
 import { connectDatabase, databaseStatus, reconnectDatabase } from './db.js';
 import { Board } from './models/Board.js';
 import {
@@ -25,13 +25,10 @@ import {
   memoryUsers, hashPassword, setDatabaseReady,
   refreshSessionUser, serializeUser, sessions,
   findUserByEmail, findUserById, findUserAiKey, updateUserAiKey,
-  isEmailVerified, markEmailVerified, normalizeDeviceId, isTrustedDevice, trustDevice
+  isEmailVerified, markEmailVerified, normalizeDeviceId, isTrustedDevice, trustDevice,
+  normalizeAndValidateUsername, isUsernameTaken
 } from './auth.js';
 import { issueCode, verifyCode, findCodeByChallenge, findActiveChallenge, discardCode } from './lib/authCodes.js';
-import {
-  issueVerificationToken, consumeVerificationToken, clearVerificationTokens,
-  RESEND_COOLDOWN_MS
-} from './lib/emailVerification.js';
 import { sendMail } from './lib/email.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH, findBestSkilledMember, pickRandomMember } from './ai.js';
 import {
@@ -44,7 +41,9 @@ import{
 import {
   boardNameFromGoal, createBoardWithPlan, normalizeBoardGenerationRequest, planningMessage, tasksFromAiResult
 } from './lib/aiBoardPlan.js';
-import { applyStatusLifecycle } from './lib/taskService.js';
+import {
+  applyStatusLifecycle, emitTaskCreated, emitTaskAssigned, emitTaskStatusChanged
+} from './lib/taskService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -289,37 +288,6 @@ async function sendCodeEmail({ email, purpose, code }) {
   return sendMail({ to: email, subject: copy.subject, text });
 }
 
-// Verification links point at the frontend, not the API. APP_URL is the
-// explicit setting; development falls back to Vite and production falls back
-// to the host that served the request.
-function publicAppUrl(req) {
-  const configured = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
-  if (configured) return configured;
-  if (process.env.NODE_ENV === 'production') return `${req.protocol}://${req.get('host')}`;
-  return 'http://localhost:5173';
-}
-
-function verificationUrl(req, token) {
-  // The token lives in the fragment so it never reaches server, proxy, or
-  // access logs when the link is opened.
-  return `${publicAppUrl(req)}/verify-email#token=${encodeURIComponent(token)}`;
-}
-
-async function sendVerificationEmail({ req, email, token }) {
-  const link = verificationUrl(req, token);
-  const text = [
-    'Confirm your LeadAI email address',
-    '',
-    'Thanks for signing up for LeadAI. Open this link to verify your email and activate your account:',
-    '',
-    link,
-    '',
-    'This link expires in 30 minutes and can only be used once.',
-    'If you did not create a LeadAI account, you can ignore this email.'
-  ].join('\n');
-  return sendMail({ to: email, subject: 'Confirm your LeadAI email address', text });
-}
-
 // Test suites that only need a session set AUTH_OTP_DISABLED=1. It is never a
 // production default: unset means email verification is on.
 const otpEnabled = () => process.env.AUTH_OTP_DISABLED !== '1';
@@ -350,8 +318,8 @@ function otpResponse(user, purpose, challengeId) {
     challengeId,
     email: user.email,
     message: purpose === 'signup'
-      ? 'Enter the 6-digit code we emailed you to confirm your account.'
-      : 'Enter the 6-digit code we emailed you to finish signing in.'
+      ? 'Enter the 6-digit code to confirm your account.'
+      : 'Enter the 6-digit code to finish signing in.'
   };
 }
 
@@ -720,9 +688,7 @@ function profileUpdates(body) {
   if (body.username !== undefined) {
     if (typeof body.username !== 'string') throw createAuthError(400, 'Username must be text.');
     updates.username = body.username.trim().toLowerCase();
-    if (updates.username && !USERNAME_PATTERN.test(updates.username)) {
-      throw createAuthError(400, 'Username must be 3-30 characters: lowercase letters, numbers, or hyphens, and cannot start or end with a hyphen.');
-    }
+    if (updates.username) updates.username = normalizeAndValidateUsername(updates.username);
   }
   if (body.bio !== undefined) {
     if (typeof body.bio !== 'string') throw createAuthError(400, 'Bio must be text.');
@@ -967,6 +933,16 @@ app.post('/api/settings/env', requireAuth, requireRole('admin'), async (req, res
   } catch (error) { next(error); }
 });
 
+app.get('/api/auth/username-available', async (req, res, next) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    const username = normalizeAndValidateUsername(req.query?.username);
+    // Informational only. The unique index and createUser() remain the
+    // authority; this endpoint exists so the wizard can warn early.
+    res.json({ username, available: !(await isUsernameTaken(username)) });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/auth/signup', async (req, res, next) => {
   try {
     if (!otpEnabled()) {
@@ -976,23 +952,29 @@ app.post('/api/auth/signup', async (req, res, next) => {
       return res.status(201).json(legacyUser);
     }
     const user = await createUser({ ...(req.body || {}), emailVerified: false });
+    let challengeId;
     try {
-      const issued = await issueVerificationToken({ email: user.email, userId: user._id });
-      await sendVerificationEmail({ req, email: user.email, token: issued.token });
+      // A signup code is the same single-use, hashed, attempt-limited record
+      // used by sign-in. No session exists until the code is verified.
+      const issued = await issueCode({ email: user.email, purpose: 'signup' });
+      challengeId = issued.challengeId;
+      await sendCodeEmail({ email: user.email, purpose: 'signup', code: issued.code });
     } catch (error) {
       // Never leave an account nobody can verify behind when its email could
       // not be sent.
-      await clearVerificationTokens(user.email).catch(() => {});
+      if (challengeId) await discardCode(challengeId).catch(() => {});
       if (mongoReady) await User.deleteOne({ _id: user._id, emailVerified: false });
       else memoryUsers.delete(user.email);
       if (isAuthError(error)) throw error;
       console.error('Signup verification email failed:', error.message);
-      throw createAuthError(503, 'We could not send the verification email. Check the mail server settings and try again.');
+      throw createAuthError(503, 'We could not send the verification email. Check the mail settings and try again.');
     }
     return res.status(201).json({
-      verificationRequired: true,
+      otpRequired: true,
+      purpose: 'signup',
+      challengeId,
       email: user.email,
-      message: 'Check your email to verify your account.'
+      message: 'Enter the 6-digit code to confirm your account.'
     });
   } catch (error) { next(error); }
 });
@@ -1002,9 +984,25 @@ app.post('/api/auth/signin', async (req, res, next) => {
     // No session is issued until the email address is confirmed. This check is
     // server-side on every sign-in, never trusted from the frontend.
     if (!isEmailVerified(user)) {
+      // The password was correct, so it is safe to reveal that this account
+      // exists and to offer a fresh signup code. Reuse a live challenge rather
+      // than sending a second email within the cooldown.
+      let challengeId;
+      try {
+        const active = await findActiveChallenge({ email: user.email, purpose: 'signup' });
+        challengeId = active?.challengeId || await issueAuthChallenge(user, 'signup');
+      } catch (error) {
+        if (isAuthError(error)) throw error;
+        console.error('Signup verification email failed:', error.message);
+        throw createAuthError(503, 'We could not send the confirmation code. Check the mail settings and try again.');
+      }
       return res.status(403).json({
         code: 'EMAIL_NOT_VERIFIED',
-        error: 'Verify your email address before signing in. Check your inbox or resend the verification email.'
+        otpRequired: true,
+        purpose: 'signup',
+        challengeId,
+        email: user.email,
+        error: 'Confirm your email address before signing in. Enter the 6-digit code for this account.'
       });
     }
     if (otpEnabled()) {
@@ -1029,58 +1027,6 @@ app.post('/api/auth/signin', async (req, res, next) => {
     res.json(await startSessionFor(user));
   } catch (error) { next(error); }
 });
-app.post('/api/auth/verify-email', async (req, res, next) => {
-  // Links carry a one-time token; never let a cache or intermediary store the
-  // response or the request URL.
-  res.setHeader('Cache-Control', 'no-store');
-  try {
-    const record = await consumeVerificationToken({ token: req.body?.token });
-    const user = await findUserByEmail(record.email);
-    if (!user || String(user._id) !== String(record.userId)) {
-      return res.status(400).json({ error: 'This verification link is no longer valid. Request a new one.' });
-    }
-    // Delivery failures happen before this point, so reaching here means the
-    // address was proven; only then is the flag written.
-    if (!isEmailVerified(user)) await markEmailVerified(user);
-    await ensureStarterWorkspace(user);
-    res.json({ ok: true, email: user.email, message: 'Email verified. You can sign in now.' });
-  } catch (error) { next(error); }
-});
-app.post('/api/auth/verify-email/resend', async (req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store');
-  try {
-    const email = String(req.body?.email || '').trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return res.status(400).json({ error: 'Enter a valid email address.' });
-    }
-    // Always the same answer and cooldown for known and unknown addresses, so
-    // this endpoint cannot be used to discover which emails have accounts.
-    const cooldownSeconds = Math.ceil(RESEND_COOLDOWN_MS / 1000);
-    const generic = {
-      ok: true,
-      cooldownSeconds,
-      message: 'If that account is waiting for verification, a new link is on its way.'
-    };
-
-    const user = await findUserByEmail(email);
-    if (!user || isEmailVerified(user)) return res.json(generic);
-
-    const issued = await issueVerificationToken({ email, userId: user._id, enforceCooldown: false });
-    if (issued.throttled) return res.json({ ...generic, cooldownSeconds: issued.retryAfter });
-
-    try {
-      await sendVerificationEmail({ req, email, token: issued.token });
-    } catch (error) {
-      // Do not leave a token behind for an email that was never delivered:
-      // otherwise an immediate retry would be reported as throttled.
-      await clearVerificationTokens(email).catch(() => {});
-      console.error('Verification email failed:', error.message);
-      return res.status(503).json({ error: 'We could not send the verification email. Try again shortly.' });
-    }
-    res.json(generic);
-  } catch (error) { next(error); }
-});
-
 app.post('/api/auth/otp/verify', async (req, res, next) => {
   try {
     const record = await verifyCode({
@@ -1110,7 +1056,7 @@ app.post('/api/auth/otp/resend', async (req, res, next) => {
     } catch (error) {
       if (isAuthError(error)) throw error;
       console.error('Verification email failed:', error.message);
-      throw createAuthError(503, 'We could not send the email. Check the mail server settings and try again.');
+      throw createAuthError(503, 'We could not send the email. Check the mail settings and try again.');
     }
     await discardCode(previous.challengeId);
     res.json({ ok: true, challengeId });
@@ -1202,7 +1148,7 @@ app.post('/api/auth/reset-password/request', async (req, res, next) => {
     res.json({
       ok: true,
       challengeId,
-      message: 'If an account exists for that email, a 6-digit code is on its way. It expires in 10 minutes.'
+      message: 'If an account exists for that email, a 6-digit code has been generated. It expires in 10 minutes.'
     });
   } catch (error) { next(error); }
 });
@@ -1364,7 +1310,12 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
       comments: [], attachments: [], dependencies: []
     });
     const now = new Date();
-    await writeTaskHistory(task._id, sprint ? sprintId(sprint) : null, null, task.status, userId(req), now);
+    const teamId = sprint ? sprintId(sprint) : null;
+    await writeTaskHistory(task._id, teamId, null, task.status, userId(req), now);
+    // Domain events are emitted only after the task and its history entry are
+    // persisted, so a failed write can never produce a success event.
+    emitTaskCreated({ task, actorId: userId(req), teamId, at: now });
+    if (task.assigneeId) emitTaskAssigned({ task, previousAssigneeId: null, actorId: userId(req), at: now });
     res.status(201).json(taskView(task));
   } catch (error) { next(error); }
 });
@@ -1402,7 +1353,10 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (updates.title !== undefined) updates.title = updates.title.trim();
     if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
     if (updates.labels) updates.labels = [...new Set(updates.labels)];
-    if (updates.status !== undefined && updates.status !== task.status) {
+    const previousStatus = task.status;
+    const previousAssigneeId = task.assigneeId ?? null;
+    let statusChangedAt = null;
+    if (updates.status !== undefined && updates.status !== previousStatus) {
       const now = new Date();
       // Only the lifecycle fields are needed; spreading a Mongoose document
       // would drop the persisted timestamps and reset startedAt on every move.
@@ -1410,9 +1364,24 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
       if (lifecycle.startedAt !== task.startedAt) updates.startedAt = lifecycle.startedAt;
       if (lifecycle.completedAt !== task.completedAt) updates.completedAt = lifecycle.completedAt;
       updates.updatedAt = lifecycle.updatedAt;
-      await writeTaskHistory(task._id, task.sprintId, task.status, updates.status, userId(req), now);
+      statusChangedAt = lifecycle.updatedAt;
+      await writeTaskHistory(task._id, task.sprintId, previousStatus, updates.status, userId(req), now);
     }
-    res.json(taskView(await store.update(task.key, updates)));
+    const updated = await store.update(task.key, updates);
+    // Emit from persisted state, after the write: no-op edits and failed
+    // validations never produce events.
+    if (statusChangedAt) {
+      emitTaskStatusChanged({
+        task: updated, from: previousStatus, to: updated.status,
+        actorId: userId(req), teamId: updated.sprintId ?? null, at: statusChangedAt
+      });
+    }
+    if (updates.assigneeId !== undefined) {
+      emitTaskAssigned({
+        task: updated, previousAssigneeId, actorId: userId(req), at: new Date()
+      });
+    }
+    res.json(taskView(updated));
   } catch (error) { next(error); }
 });
 app.delete('/api/tasks/:key', requireAuth, async (req, res, next) => {
@@ -1821,7 +1790,14 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Attachment is invalid or too large.' });
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
-  if (isAuthError(error)) return res.status(error.status).json({ error: error.message });
+  if (isAuthError(error)) {
+    // Machine-readable codes (for example AI_UNAVAILABLE) travel next to the
+    // human message so clients can branch without parsing prose.
+    return res.status(error.status).json({
+      error: error.message,
+      ...(typeof error.code === 'string' ? { code: error.code } : {})
+    });
+  }
   // A malformed id or badly typed field is the client's mistake, not a server fault.
   if (error?.name === 'CastError' || error?.name === 'ValidationError') {
     return res.status(400).json({ error: 'One or more fields contained an invalid value.' });

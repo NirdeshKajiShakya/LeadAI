@@ -53,10 +53,26 @@ await check('repeated wrong guesses destroy the code', async () => {
   }
   assert.equal(lastError.status, 429);
   assert.match(lastError.message, /Too many incorrect attempts/);
+  // The exhausted record is kept (so resend can still find it) but can never
+  // verify, even with the correct code.
   await assert.rejects(
     () => verifyCode({ challengeId, code, purposes: ['login'], now: t0 + 3 * RESEND_COOLDOWN_MS }),
+    (error) => error.status === 429 && /Too many incorrect attempts/.test(error.message)
+  );
+});
+
+await check('a resend invalidates the previous code', async () => {
+  const resendEmail = `resend-${Date.now()}@example.com`;
+  const issuedAt = t0;
+  const first = await issueCode({ email: resendEmail, purpose: 'login', now: issuedAt });
+  const second = await issueCode({ email: resendEmail, purpose: 'login', now: issuedAt + RESEND_COOLDOWN_MS });
+  assert.notEqual(first.challengeId, second.challengeId);
+  await assert.rejects(
+    () => verifyCode({ challengeId: first.challengeId, code: first.code, purposes: ['login'], now: issuedAt + RESEND_COOLDOWN_MS + 1 }),
     (error) => error.status === 400
   );
+  const record = await verifyCode({ challengeId: second.challengeId, code: second.code, purposes: ['login'], now: issuedAt + RESEND_COOLDOWN_MS + 1 });
+  assert.equal(record.purpose, 'login');
 });
 
 await check('codes expire after ten minutes', async () => {

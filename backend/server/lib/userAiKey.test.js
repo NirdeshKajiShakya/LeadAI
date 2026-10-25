@@ -53,7 +53,7 @@ try {
   console.log(`user AI key checks, in-memory mode (port ${PORT})\n`);
 
   const email = `aikey-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Key Holder', email, password: 'Password123!' }) });
+  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Key Holder', username: `key-holder-${Date.now()}`, email, password: 'Password123!' }) });
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   const token = signedIn.body.token;
   assert.ok(token, 'expected a session token');

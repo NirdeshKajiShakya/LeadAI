@@ -43,7 +43,7 @@ try {
   check('health reports ok', () => assert.equal(health.body.ok, true));
 
   const email = `sprint-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Sprint Tester', email, password: 'Password123!' }) });
+  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Sprint Tester', username: `sprint-${Date.now()}`, email, password: 'Password123!' }) });
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   globalThis.authToken = signedIn.body.token;
 

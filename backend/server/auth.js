@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
-import { User } from './models/User.js';
+import { User, USERNAME_PATTERN, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH, normalizeUsername } from './models/User.js';
 
 export const BCRYPT_ROUNDS = 12;
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -41,10 +41,66 @@ export async function verifyPassword(password, hash) {
   return Boolean(password && hash && await bcrypt.compare(password, hash));
 }
 
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 128;
+export const PASSWORD_RULES = Object.freeze([
+  { id: 'length', label: `At least ${PASSWORD_MIN_LENGTH} characters` },
+  { id: 'lowercase', label: 'One lowercase letter' },
+  { id: 'uppercase', label: 'One uppercase letter' },
+  { id: 'number', label: 'One number' },
+  { id: 'special', label: 'One special character' }
+]);
+
+export const PASSWORD_CHECKS = Object.freeze({
+  length: (value) => value.length >= PASSWORD_MIN_LENGTH && value.length <= PASSWORD_MAX_LENGTH,
+  lowercase: (value) => /[a-z]/.test(value),
+  uppercase: (value) => /[A-Z]/.test(value),
+  number: (value) => /[0-9]/.test(value),
+  special: (value) => /[^A-Za-z0-9]/.test(value)
+});
+
+// The same five checks run in the browser for the live checklist. This function
+// stays authoritative: a request that bypasses the UI still fails here.
+export function passwordViolations(password) {
+  const value = typeof password === 'string' ? password : '';
+  return PASSWORD_RULES
+    .filter((rule) => !PASSWORD_CHECKS[rule.id](value))
+    .map((rule) => rule.label);
+}
+
 export function validatePassword(password) {
-  if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
-    throw createAuthError(400, 'Password must be between 8 and 128 characters.');
+  if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH || password.length > PASSWORD_MAX_LENGTH) {
+    throw createAuthError(400, `Password must be between ${PASSWORD_MIN_LENGTH} and ${PASSWORD_MAX_LENGTH} characters.`);
   }
+  const violations = passwordViolations(password);
+  if (violations.length) {
+    throw createAuthError(400, `Password must include ${violations.join(', ').replace(/, ([^,]*)$/, ' and $1')}.`);
+  }
+}
+
+export function normalizeAndValidateUsername(value) {
+  const username = normalizeUsername(value);
+  if (!username) throw createAuthError(400, 'A username is required.');
+  if (username.length < USERNAME_MIN_LENGTH || username.length > USERNAME_MAX_LENGTH) {
+    throw createAuthError(400, `Username must be between ${USERNAME_MIN_LENGTH} and ${USERNAME_MAX_LENGTH} characters.`);
+  }
+  if (!USERNAME_PATTERN.test(username)) {
+    throw createAuthError(400, 'Username may use lowercase letters, numbers, and hyphens, and must start and end with a letter or number.');
+  }
+  return username;
+}
+
+export async function isUsernameTaken(username, excludeUserId = null) {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return false;
+  if (!databaseReady) {
+    return [...memoryUsers.values()].some((user) => (
+      user.username === normalized && String(user._id) !== String(excludeUserId)
+    ));
+  }
+  const query = { username: normalized };
+  if (excludeUserId) query._id = { $ne: excludeUserId };
+  return Boolean(await User.exists(query));
 }
 
 export function serializeUser(user) {
@@ -78,24 +134,34 @@ export async function findUserById(id) {
   return User.findById(id);
 }
 
-export async function createUser({ email, password, name, role = 'member', emailVerified = true }) {
+export async function createUser({ email, password, name, username, role = 'member', emailVerified = true }) {
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
     throw createAuthError(400, 'A valid email address is required.');
   }
   validatePassword(password);
+  const normalizedUsername = normalizeAndValidateUsername(username);
+  if (await isUsernameTaken(normalizedUsername)) {
+    throw createAuthError(409, 'That username is already taken.');
+  }
   const passwordHash = await hashPassword(password);
   if (!passwordHash) throw createAuthError(500, 'Could not create account.');
   const data = {
     email: normalizedEmail,
     passwordHash,
     name: String(name || '').trim().slice(0, 80) || normalizedEmail,
+    username: normalizedUsername,
     role: role === 'admin' ? 'member' : role,
     emailVerified: emailVerified !== false,
     skills: []
   };
   if (!databaseReady) {
     if (memoryUsers.has(normalizedEmail)) throw createAuthError(409, 'An account with this email already exists.');
+    // Synchronous re-check at the last possible moment: in-memory mode has no
+    // unique index to arbitrate two signups that raced through the first check.
+    if ([...memoryUsers.values()].some((user) => user.username === normalizedUsername)) {
+      throw createAuthError(409, 'That username is already taken.');
+    }
     const user = { ...data, _id: crypto.randomUUID() };
     memoryUsers.set(normalizedEmail, user);
     return serializeUser(user);
@@ -104,7 +170,13 @@ export async function createUser({ email, password, name, role = 'member', email
   try {
     await user.save();
   } catch (error) {
-    if (error.code === 11000) throw createAuthError(409, 'An account with this email already exists.');
+    if (error.code === 11000) {
+      // The unique indexes are the final authority when two requests race.
+      if (error.keyPattern?.username || error.keyValue?.username) {
+        throw createAuthError(409, 'That username is already taken.');
+      }
+      throw createAuthError(409, 'An account with this email already exists.');
+    }
     throw error;
   }
   return serializeUser(user);

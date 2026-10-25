@@ -32,8 +32,8 @@ async function api(path, { token, ...options } = {}) {
   return { status: response.status, body, headers: response.headers };
 }
 
-async function signUpAndIn(name, email) {
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name, email, password: 'Password123!' }) });
+async function signUpAndIn(name, email, username) {
+  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name, username, email, password: 'Password123!' }) });
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   return signedIn.body.token;
 }
@@ -63,15 +63,15 @@ try {
   const stamp = Date.now();
   const aliceEmail = `profile-alice-${stamp}@example.com`;
   const bobEmail = `profile-bob-${stamp}@example.com`;
-  const alice = await signUpAndIn('Profile Alice', aliceEmail);
-  const bob = await signUpAndIn('Profile Bob', bobEmail);
+  const alice = await signUpAndIn('Profile Alice', aliceEmail, `profile-alice-${stamp}`);
+  const bob = await signUpAndIn('Profile Bob', bobEmail, `profile-bob-${stamp}`);
 
   const initial = await api('/profile', { token: alice });
   await check('profile returns identity, real starter-task stats and no fake sprint', () => {
     assert.equal(initial.status, 200);
     assert.equal(initial.body.profile.email, aliceEmail);
     assert.equal(initial.body.profile.name, 'Profile Alice');
-    assert.equal(initial.body.profile.username, '');
+    assert.equal(initial.body.profile.username, `profile-alice-${stamp}`);
     assert.equal(initial.body.stats.totalTasks, 5);
     assert.equal(initial.body.stats.completedTasks, 1);
     assert.equal(initial.body.recentTasks.length, 5);

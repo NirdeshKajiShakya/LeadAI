@@ -50,7 +50,7 @@ async function api(path, options = {}, token = '') {
 async function signupAndSignIn(label) {
   const email = `dash-${label}-${Date.now()}@example.com`;
   const name = `Dash ${label} Tester`;
-  const signup = await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name, email, password: 'Password123!' }) });
+  const signup = await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name, username: `dashboard-${label.toLowerCase()}-${Date.now()}`, email, password: 'Password123!' }) });
   assert.equal(signup.status, 201, `signup failed for ${label}`);
   const signin = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   assert.equal(signin.status, 200, `signin failed for ${label}`);

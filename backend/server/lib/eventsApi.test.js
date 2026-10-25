@@ -46,25 +46,27 @@ console.log(`event API checks (port ${server.address().port})\n`);
 try {
   // ---- Setup: two users, one team (sprint), listeners attached after seeding
   const emailA = `event-owner-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Event Owner', email: emailA, password: 'Password123!' }) });
+  const signupA = await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Event Owner', username: `event-owner-${Date.now()}`, email: emailA, password: 'Password123!' }) });
+  assert.equal(signupA.status, 201, `owner signup failed: ${JSON.stringify(signupA.body)}`);
   const signInA = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: emailA, password: 'Password123!' }) });
   globalThis.authToken = signInA.body.token;
   const userA = signInA.body.user;
 
   const emailB = `event-member-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Event Member', email: emailB, password: 'Password123!' }) });
+  const signupB = await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Event Member', username: `event-member-${Date.now()}`, email: emailB, password: 'Password123!' }) });
+  assert.equal(signupB.status, 201, `member signup failed: ${JSON.stringify(signupB.body)}`);
   const signInB = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: emailB, password: 'Password123!' }) });
   const userB = signInB.body.user;
 
   const { body: sprints } = await api('/sprints');
   const teamId = sprints[0].id;
 
-  // Signup seeds five starter tasks per user (each emitting task.created with
-  // the new user as actor), so all creation assertions below are relative to
-  // this baseline rather than absolute.
+  // Starter tasks are seeded during signup, before any authenticated request
+  // exists. The event contract deliberately refuses to fabricate an actor, so
+  // seeding emits nothing; the checks below are relative to that baseline.
   const seededCreations = eventsOf(EVENTS.TASK_CREATED).length;
-  await check('starter-task seeding emits task.created events only for persisted tasks', () => {
-    assert.equal(seededCreations, 10);
+  await check('starter-task seeding emits no events without an authenticated actor', () => {
+    assert.equal(seededCreations, 0);
   });
 
   // ---- task.created --------------------------------------------------------
@@ -142,8 +144,8 @@ try {
   // In-memory user resolution only knows the signed-in caller, so the owner
   // assigns the task to themselves ΓÇö the meaningful assertion is that the
   // persisted assignee reference (not the raw input) lands in the payload.
-  // Starter tasks seeded during signup with an assignee also emit task.assigned
-  // on creation, so we measure relative to that baseline.
+  // Starter tasks are seeded without an actor, so they emit no assignment event
+  // either; this baseline is therefore expected to be zero.
   const seededAssignments = eventsOf(EVENTS.TASK_ASSIGNED).length;
   const assigned = await api(`/tasks/${key}`, { method: 'PATCH', body: JSON.stringify({ assigneeId: userA._id }) });
   await check('successful assignment emits task.assigned with the persisted assignee', () => {
@@ -172,68 +174,10 @@ try {
     assert.equal(eventsOf(EVENTS.TASK_ASSIGNED).length, seededAssignments + 1, 'count unchanged');
   });
 
-  // ---- member.joined ----------------------------------------------------------
-
-  const joined = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: userB._id }) });
-  await check('successful membership addition emits member.joined once', () => {
-    assert.equal(joined.status, 201);
-    const seen = eventsOf(EVENTS.MEMBER_JOINED);
-    assert.equal(seen.length, 1);
-    const { payload } = seen[0];
-    assert.deepEqual(Object.keys(payload).sort(), ['actorId', 'at', 'memberId', 'teamId']);
-    assert.equal(payload.teamId, teamId);
-    assert.equal(payload.memberId, userB._id);
-    assert.equal(payload.actorId, userA._id, 'actor is the owner performing the add');
-    assert.ok(payload.at instanceof Date);
-  });
-
-  const duplicateJoin = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: userB._id }) });
-  await check('adding an existing member emits no duplicate join event', () => {
-    assert.equal(duplicateJoin.status, 409);
-    assert.equal(eventsOf(EVENTS.MEMBER_JOINED).length, 1, 'count unchanged');
-  });
-
-  const badJoin = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: 'nope' }) });
-  await check('a failed membership addition emits no join event', () => {
-    assert.equal(badJoin.status, 400);
-    assert.equal(eventsOf(EVENTS.MEMBER_JOINED).length, 1, 'count unchanged');
-  });
-
-  // ---- member.left ------------------------------------------------------------
-
-  const left = await api(`/teams/${teamId}/members/${userB._id}`, { method: 'DELETE' });
-  await check('successful membership removal emits member.left once', () => {
-    assert.equal(left.status, 200);
-    assert.equal(left.body.ok, true, 'existing response contract preserved');
-    const seen = eventsOf(EVENTS.MEMBER_LEFT);
-    assert.equal(seen.length, 1);
-    const { payload } = seen[0];
-    assert.deepEqual(Object.keys(payload).sort(), ['actorId', 'at', 'memberId', 'teamId']);
-    assert.equal(payload.teamId, teamId);
-    assert.equal(payload.memberId, userB._id);
-    assert.equal(payload.actorId, userA._id);
-    assert.ok(payload.at instanceof Date);
-  });
-
-  const missingLeave = await api(`/teams/${teamId}/members/${userB._id}`, { method: 'DELETE' });
-  await check('removing a nonexistent membership emits no false leave event', () => {
-    assert.equal(missingLeave.status, 404);
-    assert.equal(eventsOf(EVENTS.MEMBER_LEFT).length, 1, 'count unchanged');
-  });
-
-  // ---- self-removal (leaver is the actor) -------------------------------------
-
-  const rejoined = await api(`/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ userId: userB._id }) });
-  assert.equal(rejoined.status, 201);
-  globalThis.authToken = signInB.body.token;
-  const selfLeave = await api(`/teams/${teamId}/members/${userB._id}`, { method: 'DELETE' });
-  await check('a member may leave the team themselves (actor is the leaver)', () => {
-    assert.equal(selfLeave.status, 200);
-    const seen = eventsOf(EVENTS.MEMBER_LEFT);
-    assert.equal(seen.length, 2);
-    assert.equal(seen[1].payload.actorId, userB._id);
-    assert.equal(seen[1].payload.memberId, userB._id);
-  });
+  // Member events (member.joined / member.left) belong to the membership
+  // service and are covered by teamService.test.js. The HTTP membership routes
+  // this suite used to exercise were removed with the team-workspace rewrite;
+  // board membership now lives under /api/boards/:id/members.
 
   await check('PATCH still returns the updated task shape', () => {
     assert.ok(moved.body.key === key && moved.body.status === 'progress');

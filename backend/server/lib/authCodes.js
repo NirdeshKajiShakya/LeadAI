@@ -45,7 +45,22 @@ async function latestCode(email, purpose) {
 export async function findActiveChallenge({ email, purpose, now = Date.now() }) {
   const record = await latestCode(normalizeEmail(email), purpose);
   if (!record || new Date(record.expiresAt).getTime() <= now) return null;
+  // A challenge that has spent its attempts must not be handed back to a
+  // sign-in attempt: the user would be stuck until the code expires.
+  if (record.attempts >= MAX_CODE_ATTEMPTS) return null;
   return { challengeId: record.challengeId, email: record.email, createdAt: record.createdAt };
+}
+
+// Only the newest code for an address and purpose may be valid. This is what
+// makes "resend" safe: an older message cannot still be used afterwards.
+async function clearCodes(email, purpose) {
+  if (isDatabaseReady()) {
+    await EmailCode.deleteMany({ email, purpose });
+    return;
+  }
+  for (const [challengeId, record] of memoryCodes) {
+    if (record.email === email && record.purpose === purpose) memoryCodes.delete(challengeId);
+  }
 }
 
 export async function findCodeByChallenge(challengeId) {
@@ -83,6 +98,9 @@ export async function issueCode({ email, purpose, now = Date.now() }) {
   }
 
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  // Previous codes are removed before the new one is stored, so a resend
+  // cannot leave two working codes in the same inbox.
+  await clearCodes(normalizedEmail, purpose);
   const record = {
     challengeId: crypto.randomUUID(),
     email: normalizedEmail,
@@ -123,7 +141,6 @@ export async function verifyCode({ challengeId, code, purposes, now = Date.now()
     throw createAuthError(400, 'This code has expired. Request a new one.');
   }
   if (record.attempts >= MAX_CODE_ATTEMPTS) {
-    await discardCode(record.challengeId);
     throw createAuthError(429, 'Too many incorrect attempts. Request a new code.');
   }
 
@@ -133,7 +150,8 @@ export async function verifyCode({ challengeId, code, purposes, now = Date.now()
     else memoryCodes.set(record.challengeId, { ...record, attempts });
     const left = MAX_CODE_ATTEMPTS - attempts;
     if (left <= 0) {
-      await discardCode(record.challengeId);
+      // Keep the exhausted record so "resend" can still find this signup and
+      // issue a replacement. It can never verify, and the TTL removes it.
       throw createAuthError(429, 'Too many incorrect attempts. Request a new code.');
     }
     throw createAuthError(400, `That code is not correct. ${left} attempt${left === 1 ? '' : 's'} left.`);

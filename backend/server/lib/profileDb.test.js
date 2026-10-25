@@ -104,7 +104,7 @@ try {
 
     const stamp = Date.now();
     const email = `db-profile-${stamp}@example.com`;
-    await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'DB Profile', email, password: 'Password123!' }) });
+    await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'DB Profile', username: `db-seed-${stamp}`, email, password: 'Password123!' }) });
     const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
     const token = signedIn.body.token;
     await check('sign-in works against the shared database', () => assert.ok(token));
@@ -142,7 +142,7 @@ try {
     });
 
     const otherEmail = `db-other-${stamp}@example.com`;
-    await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Other Dev', email: otherEmail, password: 'Password123!' }) });
+    await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Other Dev', username: `db-other-${stamp}`, email: otherEmail, password: 'Password123!' }) });
     const otherSignIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: otherEmail, password: 'Password123!' }) });
     await api('/profile', { token: otherSignIn.body.token, method: 'PATCH', body: JSON.stringify({ username: `taken-${stamp}` }) });
     const duplicate = await api('/profile', { token, method: 'PATCH', body: JSON.stringify({ username: `taken-${stamp}` }) });

@@ -58,7 +58,6 @@ export function emitTaskAssigned({ task, previousAssigneeId, actorId, at }) {
     assigneeId,
     at
   });
-  console.log('[taskService] emitTaskAssigned emitted for task', task._id, 'assignee', assigneeId);
 }
 
 const IN_PROGRESS_STATUSES = new Set(['progress', 'review']);

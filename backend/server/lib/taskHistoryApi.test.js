@@ -44,7 +44,7 @@ try {
   console.log(`task history + schema API checks (port ${PORT})\n`);
 
   const email = `history-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'History Tester', email, password: 'Password123!' }) });
+  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'History Tester', username: `history-${Date.now()}`, email, password: 'Password123!' }) });
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   globalThis.authToken = signedIn.body.token;
   const me = signedIn.body.user;

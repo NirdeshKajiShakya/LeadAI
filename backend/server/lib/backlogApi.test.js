@@ -110,7 +110,7 @@ try {
   console.log(`\nbacklog API checks (port ${PORT})\n`);
 
   const email = `backlog-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Backlog Tester', email, password: 'Password123!' }) });
+  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Backlog Tester', username: `backlog-${Date.now()}`, email, password: 'Password123!' }) });
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   token = signedIn.body.token;
 
@@ -220,7 +220,7 @@ try {
   });
 
   const otherEmail = `backlog-other-${Date.now()}@example.com`;
-  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Other Tester', email: otherEmail, password: 'Password123!' }) });
+  await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Other Tester', username: `backlog-other-${Date.now()}`, email: otherEmail, password: 'Password123!' }) });
   const otherSignedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: otherEmail, password: 'Password123!' }) });
   const { body: otherSprints } = await api('/sprints', {}, otherSignedIn.body.token);
   const intrusion = await api(`/sprints/${otherSprints[0].id}/tasks`, { method: 'POST', body: JSON.stringify({ key: low.key }) });
