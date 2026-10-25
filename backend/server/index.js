@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Task } from './models/Task.js';
 import { Sprint } from './models/Sprint.js';
-import { endDateForStart, diffCalendarDays, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
+import { addDays, endDateForStart, diffCalendarDays, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { sortBacklog } from './lib/backlogOrder.js';
 import {
   BACKLOG_STATUS, SPRINT_ENTRY_STATUS, isPermittedSprintStatusChange,
@@ -95,12 +95,13 @@ app.use((req, res, next) => {
 
 function starterTasksFor(user) {
   const name = user?.name && user.name !== user.email ? user.name : 'You';
+  const today = todayIsoDate();
   return [
-    { title: 'Welcome to your LeadAI board', status: 'done', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: 'Today', description: 'This board belongs to you. Create, organize, and move tasks however you like.' },
-    { title: 'Create your first task', status: 'todo', priority: 'high', labels: ['Getting Started'], assignee: name, dueDate: 'Today', description: 'Click "Add Task" to capture something you are working on. Try adding a label and a due date.' },
-    { title: 'Drag a card between columns', status: 'todo', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: 'Unscheduled', description: 'Move this card from To Do into In Progress to watch the board update instantly.' },
-    { title: 'Agree on a definition of done', status: 'review', priority: 'medium', labels: ['Process'], assignee: name, dueDate: 'This week', description: 'A clear definition of done keeps completed work consistent across your board.' },
-    { title: 'Invite a teammate to collaborate', status: 'backlog', priority: 'medium', labels: ['Team'], assignee: 'Unassigned', dueDate: 'Unscheduled', description: 'Share your workspace so others can comment on and track shared work.' }
+    { title: 'Welcome to your LeadAI board', status: 'done', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: today, description: 'This board belongs to you. Create, organize, and move tasks however you like.' },
+    { title: 'Create your first task', status: 'todo', priority: 'high', labels: ['Getting Started'], assignee: name, dueDate: today, description: 'Click "Add Task" to capture something you are working on. Try adding a label and a due date.' },
+    { title: 'Drag a card between columns', status: 'todo', priority: 'low', labels: ['Getting Started'], assignee: name, dueDate: null, description: 'Move this card from To Do into In Progress to watch the board update instantly.' },
+    { title: 'Agree on a definition of done', status: 'review', priority: 'medium', labels: ['Process'], assignee: name, dueDate: addDays(today, 7), description: 'A clear definition of done keeps completed work consistent across your board.' },
+    { title: 'Invite a teammate to collaborate', status: 'backlog', priority: 'medium', labels: ['Team'], assignee: 'Unassigned', dueDate: null, description: 'Share your workspace so others can comment on and track shared work.' }
   ];
 }
 let memoryTasks = [];

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { Task } from '../models/Task.js';
 
 const PORT = Number(process.env.NOTIFICATION_TEST_PORT || 4137);
 const BASE = `http://127.0.0.1:${PORT}/api`;
@@ -56,6 +57,13 @@ try {
   const member = memberAuth.body.user;
   const ownerBoards = await api('/boards', ownerToken);
   const boardId = ownerBoards.body[0].id;
+  const starterTasks = await api(`/tasks?boardId=${boardId}`, ownerToken);
+  assert.ok(starterTasks.body.length > 0);
+  for (const starterTask of starterTasks.body) {
+    assert.ok(starterTask.dueDate === null || /^\d{4}-\d{2}-\d{2}$/.test(starterTask.dueDate));
+    const casted = new Task({ key: starterTask.key, title: starterTask.title, dueDate: starterTask.dueDate });
+    await assert.doesNotReject(() => casted.validate());
+  }
 
   const invite = await api(`/boards/${boardId}/members`, ownerToken, {
     method: 'POST', body: JSON.stringify({ email: memberEmail })
