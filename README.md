@@ -1,87 +1,145 @@
 # LeadAI
-LeadAI is a project with the purpose of saving time and increasing efficency. This project aims to help teams plan better and more efficeiently. We use a KanBan board as the default, this board can be eddited manully or by the help of an AI agent. This Agent can convert your simple minimal instructions and convert it into a KanBan board with tasks while keeping the skill sets of the memebers of the team into consideration.
 
-## Part 1: Problem
+LeadAI is an AI-assisted project planning and team workspace. It helps teams turn project goals into organized work, keep a shared Kanban board up to date, and match tasks to team members' skills. You can manage work manually or use the AI features to help plan and prioritize it.
 
-Managing skill sets and task boards is a time-consuming, friction-heavy challenge for professional and general teams alike. When a leader forms a new team, they must quickly account for critical variables like unfamiliar team members, varying skill sets, and shifting schedules. Manually collecting skills, mapping dependencies, and assigning work is an exhausting, labor-intensive process. Left unsolved, this leads to misallocated talent, severe project delays, burn-out from administrative overhead, and costly productivity losses from unaligned workflows.
+## What you can do
 
-## Part 2: Idea
+- Organize work on boards with Backlog, To Do, In Progress, In Review / QA, and Done columns.
+- Create and update tasks with priorities, due dates, labels, story points, checklists, attachments, and comments.
+- Plan and track sprints, view a work dashboard, and manage team members and profiles.
+- Use AI Copilot to help plan boards, estimate story points, and assign work based on member skills.
+- Receive notifications and configure task automation.
+- Sign up and manage your own workspace with authenticated accounts.
 
-Our AI platform eliminates this administrative friction by automatically generating optimized task boards based on pre-configured team skill profiles. By mapping task requirements directly to individual capabilities, the AI creates an ideal schedule in seconds rather than hours. Beyond setup, the system provides dynamic, real-time workload management: users can fine-tune assignments manually, or let the AI automatically redistribute tasks and notify affected team members whenever someone joins or leaves the group.
+## Technology
 
-## What AI does with it:
+- **Frontend:** React and Vite
+- **Backend:** Node.js and Express
+- **Database:** MongoDB with Mongoose
+- **AI:** Optional OpenRouter API integration
 
-The AI ingests unstructured project goals alongside team member profiles, using Natural Language Processing (NLP) to analyze and classify individual skill sets, experience levels, and availability. It then uses predictive modeling and constraint optimization to judge task complexity, estimate completion timelines, and decide the optimal distribution of workload across the team.
+## Requirements
 
-## What comes out as a result:
+- Node.js and npm
+- MongoDB running locally, or access to a MongoDB server such as MongoDB Atlas
+- An OpenRouter API key is optional. Without one, the app can run in demo mode without AI-powered features.
 
-A fully optimized, ready-to-use task board with intelligently assigned roles and balanced workloads. When changes occur—such as team members joining or leaving—the AI dynamically predicts project bottlenecks, recalculates dependencies, and decides how to instantly reallocate tasks and issue automated notifications to keep the workflow seamless.
+## Start locally
 
-## Figma 
-https://www.figma.com/design/b1TtQjgqK0SzCqi0mn2wAf/LeadAI?node-id=1-3&t=8JU2KGrmYrX10Kmm-1
+1. Clone the repository and open a terminal in the project root.
+2. Install the dependencies:
 
-## Run the app
+   ```bash
+   npm run install:all
+   ```
 
-The functional MERN implementation is split into `frontend/` and `backend/`. The `stitch_ai_kanban_task_manager/` directory now contains only the retained Stitch design components.
+3. Configure the backend database before starting the app:
 
-```bash
-npm run install:all   # first time only (installs root + backend + frontend)
-npm run dev           # runs backend (:4000) + frontend (:5173) together
-```
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
 
-Open `http://localhost:5173`. The API runs on port 4000. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` to the team's shared development database (see below). The API refuses to start with a missing or unreachable database; `ALLOW_MEMORY_DB=true` is the only (offline-only) way to run on throwaway in-memory data. See `instructions/` for API, environment, and navigation details.
+   The example uses `mongodb://localhost:27017/leadai`. Start your local MongoDB service before continuing, or edit `MONGODB_URI` in `backend/.env` to use a reachable MongoDB URI. The backend must be able to connect to MongoDB when it starts; the first-run setup screen cannot be used to configure a remote database if the backend cannot start.
 
-To run the applications separately, use two terminals:
+4. Start the backend and frontend together:
+
+   ```bash
+   npm run dev
+   ```
+
+5. Open [http://localhost:5173](http://localhost:5173). The backend API runs on [http://localhost:4000](http://localhost:4000).
+
+On first use, LeadAI opens a setup screen. Select the local database or enter a cloud MongoDB URI, then provide an OpenRouter API key or choose **Skip / Demo Mode**. Setup is saved to `backend/.env`. Then create an account from the landing page to start using your workspace.
+
+### Configure AI later
+
+You can enter or change the OpenRouter API key in the app's Settings page. You can also set `OPENROUTER_API_KEY` in `backend/.env`. Get an API key from [OpenRouter](https://openrouter.ai/keys). Keep it private and never commit it.
+
+### Run frontend and backend separately
+
+If you prefer separate terminals:
 
 ```bash
 # Terminal 1: backend API
-cd backend
-npm run dev
+npm run dev:backend
 
-# Terminal 2: frontend Vite server
-cd frontend
-npm run dev
+# Terminal 2: frontend
+npm run dev:frontend
 ```
 
-The app requires an account. Authentication uses short-lived bearer sessions; sign-up always creates a member account. Task attachments are stored under `backend/uploads/` and are excluded from public static serving. Password reset requests intentionally return the same response for known and unknown email addresses; configure an email delivery adapter before using reset links in production.
-
-## Shared development database
-
-All five developers connect to one development MongoDB database. Git carries code, schema/index definitions and seed scripts; it never carries database files, dumps or credentials.
-
-```text
-Developer 1 ──┐
-Developer 2 ──┤
-Developer 3 ──┼──> Shared development MongoDB (Atlas, database `leadai_dev`)
-Developer 4 ──┤
-Developer 5 ──┘
-```
-
-One-time Atlas setup (requires Atlas account access, do this together):
-
-1. Create a project and a free cluster, then a database named `leadai_dev`. Keep a separate `leadai_prod` database/cluster for production and never point development at it.
-2. Create one database user per developer (Database Access → Add New Database User). Grant `readWrite` on `leadai_dev` only, not `Atlas admin`.
-3. In Network Access, allow only the team's egress IPs. Only use `0.0.0.0/0` for a short-lived demo, and remove it afterwards.
-4. Give each developer their own `mongodb+srv://.../leadai_dev?...` URI through a password manager. Do not post URIs in chat, issues or commits.
-5. Each developer copies `backend/.env.example` to `backend/.env`, replaces `<your-name>`, `<password>` and `<cluster>`, then runs the commands below.
-
-Commands after cloning and after every pull that changes schemas:
+The Vite development server forwards `/api` requests to `http://localhost:4000`. If the backend uses a different port, set `PORT` in `backend/.env` and set `VITE_API_PROXY_TARGET` in the shell before starting Vite, for example:
 
 ```bash
-npm run install:all                 # first time only
-npm --prefix backend run db:check   # confirms which database and indexes you are using
-npm --prefix backend run db:setup   # creates missing indexes; never edits data
-npm --prefix backend run db:seed -- --email=you@example.com   # optional, idempotent
-npm run dev
+VITE_API_PROXY_TARGET=http://localhost:4101 npm run dev:frontend
 ```
 
-What is shared and how:
+For a separately hosted API, set `VITE_API_BASE_URL` in `frontend/.env` to the API's base URL. Leave it blank for the local Vite proxy.
 
-- **Schema and indexes** live in `backend/server/models/` and are applied with `db:setup` (`createIndexes`, no drops).
-- **Sample data** is added by `db:seed`, which upserts by stable key and never overwrites edits or duplicates rows.
-- **Live development data** lives only in the shared database, so a `git pull` never changes it.
-- **Migrations**: this app has no versioned migration runner; when a schema change needs a data backfill, add a script under `backend/scripts/` and document it in the pull request. Keep it idempotent.
-- **Never** commit `.env` files, `mongodump` output, uploads or user records. `.gitignore` blocks them.
-- **Tests** use `ALLOW_MEMORY_DB=1` (in-memory) and `npm --prefix backend run test:db`, which uses a disposable `leadai_test_*` database on the local MongoDB server.
+## Database setup and data
 
-If MongoDB is unreachable the API exits with a clear error instead of silently switching to in-memory storage. That fallback was the reason teammates saw different data and lost it on restart.
+- The backend reads its environment from `backend/.env`. `backend/.env.example` is a template; never commit `backend/.env` or share its credentials in source control.
+- The default database is local MongoDB at `mongodb://localhost:27017/leadai`. Use a separate development database; do not point local development at production.
+- If teammates need to collaborate on the same accounts and boards, configure each backend to use the same shared development MongoDB database. Share database credentials privately and grant only the access the team needs.
+- Changing the database connection does not copy existing accounts, boards, or tasks.
+- Task attachments are stored in `backend/uploads/`, which is local to the backend instance.
+- The backend does not silently fall back to in-memory storage when MongoDB is unavailable. The in-memory option is intended for explicit development/testing use only; it is temporary and is not shared between processes.
+
+After a schema or index change, ensure the configured database has the current indexes:
+
+```bash
+npm --prefix backend run db:setup
+npm --prefix backend run db:check
+```
+
+To add optional baseline sample tasks for an account that already exists:
+
+```bash
+npm --prefix backend run db:seed -- --email=you@example.com
+```
+
+These commands use the `MONGODB_URI` configured in `backend/.env`. The seed command is idempotent and does not overwrite existing task data.
+
+## Build and tests
+
+Build the frontend:
+
+```bash
+npm run build
+```
+
+Run the backend unit/API test suite:
+
+```bash
+npm test
+```
+
+Run the AI-related tests:
+
+```bash
+npm --prefix backend run test:ai
+```
+
+The optional database integration tests use a local MongoDB server and create a disposable database with a `leadai_test_` name:
+
+```bash
+npm run test:db
+```
+
+Do not point database tests at a production server. To run the production server locally after building the frontend, configure `backend/.env` and run:
+
+```bash
+npm start
+```
+
+## Troubleshooting
+
+- **The backend exits with a MongoDB connection error:** Make sure MongoDB is running and the URI in `backend/.env` is correct and reachable. For Atlas, check the cluster hostname, database credentials, and network access allowlist.
+- **The browser cannot reach the API:** Confirm the backend is running on port `4000`, or configure `VITE_API_PROXY_TARGET` to match its port and restart the frontend.
+- **AI features are unavailable:** Configure a valid OpenRouter API key in Settings or `backend/.env`. The app can still be used in demo mode without AI.
+- **A port is already in use:** Set a different backend `PORT` and update `VITE_API_PROXY_TARGET` to that backend URL before restarting the frontend.
+
+Check the API's database health at [http://localhost:4000/api/health](http://localhost:4000/api/health).
+
+## Design
+
+The original project design is available in [Figma](https://www.figma.com/design/b1TtQjgqK0SzCqi0mn2wAf/LeadAI?node-id=1-3&t=8JU2KGrmYrX10Kmm-1).
