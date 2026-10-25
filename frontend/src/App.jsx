@@ -11,7 +11,7 @@ import Dashboard from './Dashboard.jsx';
 import { isCalendarDate } from './sprintDates.js';
 import SettingsPage from './SettingsPage.jsx';
 import AuthScreen from './AuthScreen.jsx';
-import VerifyEmailPage from './VerifyEmailPage.jsx';
+import LandingPage from './LandingPage.jsx';
 
 const columns = [
   { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
@@ -54,6 +54,13 @@ function IconButton({ label, children, onClick, active = false }) {
 function App() {
   const [pathname, setPathname] = useState(window.location.pathname);
   const [token, setToken] = useState(() => sessionStorage.getItem('leadai-session'));
+  // Signed-out visitors start on the product overview. The auth screen opens
+  // only when they choose sign in or create account.
+  const [authView, setAuthView] = useState(() => (
+    window.location.pathname === '/signin' ? 'signin'
+      : window.location.pathname === '/signup' ? 'signup'
+        : 'landing'
+  ));
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState('');
   const [tasks, setTasks] = useState([]);
@@ -160,6 +167,7 @@ function App() {
       if (response.status === 401) {
         sessionStorage.removeItem('leadai-session');
         setToken(null);
+        setAuthView('landing');
         return [];
       }
       if (!response.ok) return [];
@@ -278,6 +286,7 @@ function App() {
     setNotificationsOpen(false);
     setToken(null);
     setUser(null);
+    setAuthView('landing');
   }
 
   function openBoardDialog(mode) {
@@ -340,6 +349,7 @@ function App() {
     setPathname('/');
     setToken(null);
     setUser(null);
+    setAuthView('landing');
   }
 
   // One place for authenticated calls: an expired session signs the user out
@@ -499,19 +509,29 @@ function App() {
     }
   }
 
-  if (pathname === '/verify-email') {
-    const next = token ? '/' : '/signin';
-    return <VerifyEmailPage
-      signedIn={Boolean(token)}
-      onContinue={() => {
-        window.history.replaceState({}, '', next);
-        setPathname(next);
-      }}
-    />;
-  }
-
   if (!token) {
-    return <AuthScreen onAuthenticated={(nextToken) => { sessionStorage.setItem('leadai-session', nextToken); setToken(nextToken); }} />;
+    if (authView === 'landing') {
+      return (
+        <LandingPage
+          onSignIn={() => setAuthView('signin')}
+          onGetStarted={() => setAuthView('signup')}
+        />
+      );
+    }
+    return (
+      <AuthScreen
+        initialStep={authView}
+        onBack={() => setAuthView('landing')}
+        onAuthenticated={(nextToken) => {
+          sessionStorage.setItem('leadai-session', nextToken);
+          // A direct /signin or /signup load must land in the workspace, not on
+          // a route the shell does not render.
+          window.history.replaceState({}, '', '/');
+          setPathname('/');
+          setToken(nextToken);
+        }}
+      />
+    );
   }
 
   async function sendCopilot(event) {

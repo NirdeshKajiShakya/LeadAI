@@ -4,30 +4,7 @@
    PART 1 - OLD: auth, board manager, task modal, sprint backlog
    (old board-canvas / board-column rules removed; replaced by new kanban in PART 5)
    ===================================================================== */
- .auth-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 0, #25364d 0, transparent 50%), var(--bg); }
- .auth-panel { width: min(100%, 420px); padding: 40px; border: 1px solid var(--line); border-radius: 12px; background: rgba(20, 26, 34, .9); box-shadow: 0 24px 80px #0008; }
- .auth-panel .logo-mark { margin-bottom: 28px; }
- .auth-panel h1 { margin-top: 10px; }
- .auth-panel p { color: var(--muted); font-size: 13px; margin-bottom: 26px; }
- .auth-panel form { display: grid; gap: 15px; }
- .auth-panel label { display: grid; gap: 7px; color: #cbd4df; font-size: 12px; }
- .auth-panel input { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: #0b1016; }
- .auth-panel .primary-button { width: 100%; margin-top: 4px; }
- .auth-switch { margin-top: 22px; width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--cyan); background: transparent; font-size: 12px; }
-.auth-switch:disabled { color: var(--muted); cursor: default; }
-.auth-step-icon { width: 38px; height: 38px; display: grid; place-items: center; margin-bottom: 16px; border: 1px solid #2b6b4f; border-radius: 50%; color: #8ff0bc; background: #14352a; }
-.auth-step-icon.is-error { border-color: #7b3935; color: #ffc4c0; background: #4b211f; }
-.auth-verify { display: grid; gap: 15px; }
-.auth-spinner { animation: auth-spin 1s linear infinite; }
-@keyframes auth-spin { to { transform: rotate(360deg); } }
-.auth-meta { display: flex; justify-content: flex-end; margin-top: -6px; }
-.auth-link { padding: 0; color: var(--cyan); background: transparent; font-size: 12px; }
-.auth-link:disabled { color: var(--muted); cursor: default; }
-.auth-actions { display: grid; gap: 2px; margin-top: 22px; }
-.auth-actions .auth-switch { margin-top: 0; }
-.auth-hint { margin: 18px 0 0; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; line-height: 1.5; }
-.auth-panel .otp-input { font-size: 22px; font-weight: 600; letter-spacing: 10px; text-align: center; font-variant-numeric: tabular-nums; padding-left: 18px; }
-.auth-panel .otp-input::placeholder { color: #3a4756; letter-spacing: 10px; }
+/* Auth screen layout and components live in auth.css. */
  .form-error { padding: 10px 12px; border-radius: 6px; color: #ffc4c0; background: #4b211f; border: 1px solid #7b3935; font-size: 12px; }
  .form-success { padding: 10px 12px; border-radius: 6px; color: #b8f5d4; background: #14352a; border: 1px solid #2b6b4f; font-size: 12px; }
  .board-empty-state { min-height: min(560px, calc(100vh - 150px)); display: grid; place-items: center; align-content: center; gap: 11px; padding: 40px 20px; text-align: center; background: radial-gradient(circle at 50% 20%, #1e3040 0, transparent 45%), var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
