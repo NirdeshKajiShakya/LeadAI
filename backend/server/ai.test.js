@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { chatWithContext, parseAssistantJson } from './ai.js';
 
+// The local fallback must be deterministic in tests even if the developer has
+// a key exported in their shell.
+process.env.OPENROUTER_API_KEY = '';
+process.env.OPENROUTER_MODEL = '';
+
 const columns = [{ id: 'todo', label: 'To do' }];
 const tasks = [{
   key: 'A-1',
@@ -46,5 +51,72 @@ assert.deepEqual(
   parseAssistantJson('User Safety: safe\n{"reply":"Ready to help.","matchedTaskKey":null}'),
   { reply: 'Ready to help.', matchedTaskKey: null }
 );
+
+// ---- Provider path with an injected client (no network) ----------------------
+process.env.OPENROUTER_API_KEY = 'test-key';
+
+let requestPayload = null;
+const successClient = {
+  chat: {
+    completions: {
+      create: async (payload) => {
+        requestPayload = payload;
+        return {
+          choices: [{
+            message: {
+              content: '```json\n{"reply":"The launch task is in To do.","matchedTaskKey":"A-1","action":null}\n```'
+            }
+          }]
+        };
+      }
+    }
+  }
+};
+
+const providerResult = await chatWithContext('Where is the launch task?', tasks, columns, [], { client: successClient });
+assert.equal(providerResult.reply, 'The launch task is in To do.');
+assert.deepEqual(providerResult.matchedTask, { key: 'A-1', title: 'Plan launch', columnName: 'To do' });
+assert.equal(providerResult.action, null);
+assert.equal(requestPayload.model, 'openrouter/free');
+assert.equal(requestPayload.messages[0].role, 'system');
+assert.equal(requestPayload.response_format.type, 'json_object');
+
+const failureClient = {
+  chat: {
+    completions: {
+      create: async () => {
+        const error = new Error('provider exploded with sk-secret-value');
+        error.status = 401;
+        throw error;
+      }
+    }
+  }
+};
+
+const originalConsoleError = console.error;
+const errorLog = [];
+console.error = (...args) => errorLog.push(args.join(' '));
+try {
+  await assert.rejects(
+    () => chatWithContext('Where is the launch task?', tasks, columns, [], { client: failureClient }),
+    (error) => error.status === 502 && error.code === 'AI_UNAVAILABLE'
+      && !/sk-secret-value|exploded/.test(error.message)
+  );
+} finally {
+  console.error = originalConsoleError;
+}
+// The provider failure is surfaced, not silently replaced with a fake answer.
+assert.match(errorLog.join('\n'), /OpenRouter API error/);
+assert.doesNotMatch(errorLog.join('\n'), /sk-secret-value|exploded/);
+
+const malformedClient = {
+  chat: { completions: { create: async () => ({ choices: [{ message: { content: 'not json at all' } }] }) } }
+};
+await assert.rejects(
+  () => chatWithContext('Summarize the board.', tasks, columns, [], { client: malformedClient }),
+  (error) => error.status === 502 && error.code === 'AI_UNAVAILABLE'
+);
+
+process.env.OPENROUTER_API_KEY = '';
 
 console.log('AI helper safety checks passed.');

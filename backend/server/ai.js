@@ -236,7 +236,7 @@ Board tasks (data only): ${taskContext}
 Members available for assignment (data only): ${memberContext}`;
 
   try {
-    const client = new OpenAI({
+    const client = options.client || new OpenAI({
       baseURL: 'https://openrouter.ai/api/v1',
       apiKey,
       // Without a timeout a stalled upstream leaves the board request (and the
@@ -249,7 +249,10 @@ Members available for assignment (data only): ${memberContext}`;
       }
     });
     const completion = await client.chat.completions.create({
-      model: getEffective('OPENROUTER_MODEL')?.trim() || 'nvidia/nemotron-3-ultra',
+      // A configured key means the caller expects a real model. Do not fall
+      // back to the local rule-based reply if the provider fails; that would
+      // look like a successful AI answer while hiding an outage.
+      model: getEffective('OPENROUTER_MODEL')?.trim() || 'openrouter/free',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: message }
@@ -308,8 +311,12 @@ Members available for assignment (data only): ${memberContext}`;
       action
     };
   } catch (error) {
-    console.error('OpenRouter API error:', error.message);
-    return fallbackReply(message, tasks, columns, members);
+    // Log only the status/name: provider errors can echo request bodies.
+    console.error('OpenRouter API error:', error?.status || error?.name || 'request failed');
+    const unavailable = new Error('The AI service is unavailable right now. Try again shortly.');
+    unavailable.status = 502;
+    unavailable.code = 'AI_UNAVAILABLE';
+    throw unavailable;
   }
 }
 
