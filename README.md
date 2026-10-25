@@ -13,10 +13,30 @@ LeadAI is an AI-assisted project planning and team workspace. It helps teams tur
 
 ## Technology
 
-- **Frontend:** React and Vite
-- **Backend:** Node.js and Express
-- **Database:** MongoDB with Mongoose
-- **AI:** Optional OpenRouter API integration
+- **Frontend:** React, React DOM, and Vite; the browser application is built from `frontend/src`.
+- **Backend:** Node.js with ES modules and Express; the API and application startup are in `backend/server`.
+- **Database:** MongoDB, accessed through Mongoose schemas and models in `backend/server/models`.
+- **AI integration:** The OpenAI JavaScript SDK sends chat-completion requests to OpenRouter. The provider and API key are configured on the backend; the default model is `openrouter/free`, and `OPENROUTER_MODEL` can override it.
+- **Other backend services:** `bcrypt`/`bcryptjs` for password hashing, `multer` for task attachments, and `nodemailer` for email delivery.
+
+## Architecture overview
+
+```text
+Browser (React / Vite)
+        | /api requests
+        v
+Express API (backend/server/index.js)
+  |-- authentication and authorization (auth.js)
+  |-- task, board, sprint, team, notification, and automation services
+  |-- AI planning and Copilot (ai.js, OpenRouter)
+        |
+        +--> MongoDB through Mongoose models
+        +--> backend/uploads/ for task attachment files
+```
+
+The frontend calls the Express API; during development, Vite proxies `/api` requests to the backend. The API validates requests, applies authentication and board/task access checks, and uses Mongoose models and service/helper modules to read and write application data. MongoDB stores users, teams and memberships, boards, tasks, sprints, task history, notifications, and automation settings. Task attachment metadata is stored with the task, while the uploaded file itself is stored on the backend filesystem.
+
+AI is an optional backend integration, not a requirement for manually managing work. The API sends a user's prompt and relevant board context to OpenRouter, validates and normalizes the response, then handles supported actions such as creating tasks or planning a sprint. Board and sprint data are persisted by the normal backend stores. Without an API key, AI-dependent features are unavailable; the core workspace remains usable.
 
 ## Requirements
 
@@ -130,6 +150,22 @@ Do not point database tests at a production server. To run the production server
 ```bash
 npm start
 ```
+
+## Limitations and future improvements
+
+Current limitations:
+
+- AI-generated plans and suggestions can be inaccurate; review generated or automatically applied changes in the workspace.
+- AI requests require an OpenRouter API key and network access to the provider. Prompts and the board context included in a request are sent to that third party, so avoid including confidential or sensitive information.
+- Uploaded attachments live in `backend/uploads/` on the backend instance. They are not automatically shared or synchronized across multiple backend instances, and the repository does not describe a backup or retention service for them.
+- MongoDB is required for normal persistent use. Explicit in-memory development/testing data is temporary and is not shared across processes.
+- The documented checks cover backend tests and a frontend production build; the repository does not include a documented production deployment, horizontal-scaling, or attachment object-storage setup.
+
+Possible future improvements include configurable persistent object storage for attachments, deployment and backup guidance, broader end-to-end tests, and user controls for reviewing AI-proposed changes before applying them.
+
+## AI usage disclosure
+
+`chatWithContext()` in `backend/server/ai.js` requests and parses AI output. The authenticated route handlers for `POST /api/copilot/chat`, `POST /api/ai/boards`, and `POST /api/ai/sprints` in `backend/server/index.js` consume that output programmatically: they validate supported actions and may persist generated tasks, boards, or sprints. `tasksFromAiResult()` in `backend/server/lib/aiBoardPlan.js` extracts task plans for board and sprint creation. AI configuration and provider requests stay on the backend; prompts and supplied task, sprint, or member context may be sent to OpenRouter.
 
 ## Troubleshooting
 
