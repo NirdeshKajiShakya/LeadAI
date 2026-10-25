@@ -33,6 +33,7 @@ check('planning message includes the goal and keeps work out of sprints', () => 
   assert.match(message, /named "Booking"/);
   assert.match(message, /Do not assign the work to a sprint/);
   assert.match(message, /Leave every task Unassigned/);
+  assert.match(message, /Fibonacci story-point estimate/);
 });
 
 check('only create actions become a plan', () => {

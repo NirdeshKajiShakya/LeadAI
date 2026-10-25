@@ -31,9 +31,9 @@ check('end date is start + 13 (inclusive 14)', () => {
   assert.equal(range.durationDays, 14);
 });
 
-check('range validation rejects wrong length and inverted dates', () => {
-  assert.equal(validateSprintRange('2026-10-01', '2026-10-13').ok, false, '13 days is invalid');
-  assert.equal(validateSprintRange('2026-10-01', '2026-10-15').ok, false, '15 days is invalid');
+check('range validation accepts editable sprint lengths and rejects inverted dates', () => {
+  assert.equal(validateSprintRange('2026-10-01', '2026-10-13').durationDays, 13);
+  assert.equal(validateSprintRange('2026-10-01', '2026-10-15').durationDays, 15);
   assert.equal(validateSprintRange('2026-10-05', '2026-10-01').ok, false, 'end before start is invalid');
   assert.equal(validateSprintRange('bogus', '2026-10-14').ok, false);
 });
@@ -70,6 +70,11 @@ check('upcoming and completed states', () => {
   assert.equal(computeSprintDay('2026-10-01', '2026-10-14', '2026-10-15').remaining, 0);
 });
 
+check('custom sprint duration drives the day count', () => {
+  const state = computeSprintDay('2026-10-01', '2026-10-07', '2026-10-04');
+  assert.deepEqual(state, { day: 4, total: 7, remaining: 3, state: 'active' });
+});
+
 check('progress uses completed story points over committed', () => {
   const summary = summarizeTasks([
     { status: 'done', storyPoints: 5 },
@@ -90,7 +95,15 @@ check('empty sprint does not divide by zero', () => {
 });
 
 check('missing story points count as zero', () => {
-  assert.equal(summarizeTasks([{ status: 'todo' }]).totalStoryPoints, 0);
+  const summary = summarizeTasks([
+    { status: 'todo' },
+    { status: 'review', storyPoints: Number.NaN },
+    { status: 'backlog', storyPoints: 8 }
+  ]);
+  assert.equal(summary.totalStoryPoints, 8);
+  assert.equal(summary.completedStoryPoints, 0);
+  assert.equal(summary.remainingStoryPoints, 0);
+  assert.equal(summary.progressPercent, 0);
 });
 
 check('date formatting is stable and timezone independent', () => {

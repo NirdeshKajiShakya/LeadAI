@@ -135,7 +135,27 @@ try {
     assert.equal(task.key, overdue.key);
   });
 
-  const { body: sprints } = await api('/sprints', {}, tokenA);
+  const boardId = withTasks.body.boards[0].id;
+  const secondBoard = await api('/boards', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Second Dashboard Board' })
+  }, tokenA);
+  assert.equal(secondBoard.status, 201);
+  const emptySecondBoardSummary = await api(`/dashboard/summary?boardId=${encodeURIComponent(secondBoard.body.id)}`, {}, tokenA);
+  check('selected board summary does not inherit another board sprint', () => {
+    assert.equal(emptySecondBoardSummary.body.stats.activeSprints, 0);
+    assert.equal(emptySecondBoardSummary.body.activeSprint, null);
+  });
+  const createdSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Dashboard Sprint',
+      startDate: new Date().toISOString().slice(0, 10),
+      boardId
+    })
+  }, tokenA);
+  assert.equal(createdSprint.status, 201, 'could not explicitly create dashboard sprint');
+  const { body: sprints } = await api(`/sprints?boardId=${encodeURIComponent(boardId)}`, {}, tokenA);
   const activeSprint = sprints.find((sprint) => sprint.current.state === 'active');
   check('an existing active sprint is summarised', () => assert.ok(activeSprint));
 
@@ -159,8 +179,25 @@ try {
     assert.equal(sprintDash.body.activeSprint.boardName, withTasks.body.boards[0].name);
     assert.ok(sprintDash.body.activeSprint.stages.done >= 1);
   });
+  const secondSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Second Board Sprint',
+      startDate: new Date().toISOString().slice(0, 10),
+      boardId: secondBoard.body.id
+    })
+  }, tokenA);
+  assert.equal(secondSprint.status, 201);
+  const firstBoardSummary = await api(`/dashboard/summary?boardId=${encodeURIComponent(boardId)}`, {}, tokenA);
+  const secondBoardSummary = await api(`/dashboard/summary?boardId=${encodeURIComponent(secondBoard.body.id)}`, {}, tokenA);
+  check('dashboard active sprint and metrics follow the selected board', () => {
+    assert.equal(firstBoardSummary.body.activeSprint.id, activeSprint.id);
+    assert.equal(secondBoardSummary.body.activeSprint.id, secondSprint.body.id);
+    assert.equal(firstBoardSummary.body.stats.activeSprints, 1);
+    assert.equal(secondBoardSummary.body.stats.activeSprints, 1);
+  });
   check('board cards report open work and the linked active sprint', () => {
-    const board = sprintDash.body.boards[0];
+    const board = sprintDash.body.boards.find((item) => item.id === boardId);
     assert.ok(board.openTasks > 0);
     assert.equal(board.activeSprint.id, activeSprint.id);
   });
@@ -195,7 +232,7 @@ try {
   });
   const afterAi = await api('/dashboard/summary', {}, tokenA);
   check('a failed AI request creates no board', () => {
-    assert.equal(afterAi.body.stats.boards, withTasks.body.stats.boards);
+    assert.equal(afterAi.body.stats.boards, withTasks.body.stats.boards + 1);
   });
 
   const userC = await signupAndSignIn('C');

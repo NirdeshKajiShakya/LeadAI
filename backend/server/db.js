@@ -26,6 +26,12 @@ export function parseDatabaseName(uri) {
 }
 
 export async function connectDatabase() {
+  if (memoryAllowed()) {
+    mode = 'memory';
+    lastError = null;
+    return databaseStatus();
+  }
+
   // Tiered fallback hierarchy for MONGODB_URI:
   //   Tier 1: User Settings override (via /api/settings/env)  -> getEffective
   //   Tier 2: Environment variable (backend/.env)            -> process.env

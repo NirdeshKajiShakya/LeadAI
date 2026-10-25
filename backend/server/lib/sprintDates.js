@@ -53,9 +53,6 @@ export function validateSprintRange(startIso, endIso) {
   }
   const durationDays = diffCalendarDays(startIso, endIso ?? endDateForStart(startIso));
   if (durationDays < 0) return { ok: false, error: 'End date must be on or after the start date.' };
-  if (durationDays !== SPRINT_DURATION_DAYS - 1) {
-    return { ok: false, error: `A sprint runs for ${SPRINT_DURATION_DAYS} calendar days.` };
-  }
   return { ok: true, durationDays: durationDays + 1 };
 }
 
@@ -66,9 +63,9 @@ export function computeSprintDay(startIso, endIso, todayIso = todayIsoDate()) {
   const duration = validateSprintRange(startIso, endIso);
   if (!duration.ok) return null;
   const day = elapsed + 1;
-  if (day < 1) return { day: 0, total: SPRINT_DURATION_DAYS, remaining: SPRINT_DURATION_DAYS, state: 'upcoming' };
-  if (day > SPRINT_DURATION_DAYS) return { day: SPRINT_DURATION_DAYS, total: SPRINT_DURATION_DAYS, remaining: 0, state: 'completed' };
-  return { day, total: SPRINT_DURATION_DAYS, remaining: SPRINT_DURATION_DAYS - day, state: 'active' };
+  if (day < 1) return { day: 0, total: duration.durationDays, remaining: duration.durationDays, state: 'upcoming' };
+  if (day > duration.durationDays) return { day: duration.durationDays, total: duration.durationDays, remaining: 0, state: 'completed' };
+  return { day, total: duration.durationDays, remaining: duration.durationDays - day, state: 'active' };
 }
 
 export function sprintState(startIso, endIso, todayIso = todayIsoDate()) {
@@ -84,17 +81,19 @@ export function formatDateRange(startIso, endIso) {
 // Sprint progress is committed work, not a stored value: completed story points
 // over total committed story points. Empty sprints report 0 instead of NaN.
 export function summarizeTasks(tasks = []) {
-  const totalStoryPoints = tasks.reduce((sum, task) => sum + (Number(task.storyPoints) || 0), 0);
-  const completedStoryPoints = tasks
-    .filter((task) => task.status === 'done')
-    .reduce((sum, task) => sum + (Number(task.storyPoints) || 0), 0);
+  const pointsOf = (task) => Number.isInteger(task?.storyPoints) && task.storyPoints > 0 ? task.storyPoints : 0;
+  const totalStoryPoints = tasks.reduce((sum, task) => sum + pointsOf(task), 0);
+  const completedStoryPoints = tasks.filter((task) => task?.status === 'done').reduce((sum, task) => sum + pointsOf(task), 0);
+  const remainingStoryPoints = tasks
+    .filter((task) => ['todo', 'progress', 'review'].includes(task?.status))
+    .reduce((sum, task) => sum + pointsOf(task), 0);
   const progressPercent = totalStoryPoints > 0 ? Math.round((completedStoryPoints / totalStoryPoints) * 100) : 0;
   return {
     total: tasks.length,
     completed: tasks.filter((task) => task.status === 'done').length,
     totalStoryPoints,
     completedStoryPoints,
-    remainingStoryPoints: totalStoryPoints - completedStoryPoints,
+    remainingStoryPoints,
     progressPercent
   };
 }

@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { compareBacklogTasks, sortBacklog, priorityRank } from './backlogOrder.js';
 import { isPermittedSprintStatusChange } from './taskTransitions.js';
+import { todayIsoDate } from './sprintDates.js';
 
 const PORT = process.env.TEST_BACKLOG_PORT || 4101;
 const BASE = `http://127.0.0.1:${PORT}/api`;
@@ -114,12 +115,39 @@ try {
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   token = signedIn.body.token;
 
-  const { body: sprints } = await api('/sprints');
-  const activeSprint = sprints.find((sprint) => sprint.current.state === 'active');
-  check('a seeded active sprint is available', () => assert.ok(activeSprint));
-
   const { body: initialBacklog } = await api('/backlog');
+  const boardId = initialBacklog[0].boardId;
+  const { body: noSprints } = await api(`/sprints?boardId=${encodeURIComponent(boardId)}`);
+  check('new accounts start without a generated placeholder sprint', () => assert.deepEqual(noSprints, []));
+  const createdSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Sprint 1',
+      goal: 'Ship the first product increment',
+      startDate: todayIsoDate(),
+      boardId: initialBacklog[0].boardId,
+      taskKeys: [initialBacklog[0].key]
+    })
+  });
+  const activeSprint = createdSprint.body;
+  check('a sprint is available after explicit creation', () => {
+    assert.equal(createdSprint.status, 201);
+    assert.equal(activeSprint.current.state, 'active');
+    assert.equal(activeSprint.progress.total, 1);
+  });
+  check('creating a sprint can commit selected Product Backlog tasks', () => {
+    assert.equal(createdSprint.body.progress.totalStoryPoints, 0);
+    assert.equal(createdSprint.body.progress.total, 1);
+    assert.equal(typeof createdSprint.body.id, 'string');
+  });
+
   check('seeded work is stored outside every sprint', () => assert.ok(initialBacklog.length >= 5));
+  const selectedTasks = await api(`/sprints/${activeSprint.id}/tasks`);
+  const backlogAfterCreate = await api('/backlog');
+  check('selected tasks leave the Product Backlog and enter To Do', () => {
+    assert.equal(selectedTasks.body.some((task) => task.key === initialBacklog[0].key && task.status === 'todo'), true);
+    assert.equal(backlogAfterCreate.body.some((task) => task.key === initialBacklog[0].key), false);
+  });
   check('backlog response is ordered by the shared rule', () => {
     for (let index = 1; index < initialBacklog.length; index += 1) {
       assert.ok(compareBacklogTasks(initialBacklog[index - 1], initialBacklog[index]) <= 0);
@@ -210,7 +238,7 @@ try {
   });
   check('returned task leaves the sprint list', () => assert.equal(sprintRestored.some((task) => task.key === urgent.key), false));
 
-  const upcoming = await api('/sprints', { method: 'POST', body: JSON.stringify({ name: 'Future sprint', startDate: '2030-01-06' }) });
+  const upcoming = await api('/sprints', { method: 'POST', body: JSON.stringify({ name: 'Future sprint', startDate: '2030-01-06', boardId }) });
   check('an upcoming sprint is created', () => assert.equal(upcoming.body.current.state, 'upcoming'));
   const intoFuture = await api(`/sprints/${upcoming.body.id}/tasks`, { method: 'POST', body: JSON.stringify({ key: medium.key }) });
   check('an inactive sprint cannot accept backlog items', () => assert.equal(intoFuture.status, 409));
@@ -222,8 +250,15 @@ try {
   const otherEmail = `backlog-other-${Date.now()}@example.com`;
   await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Other Tester', email: otherEmail, password: 'Password123!' }) });
   const otherSignedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: otherEmail, password: 'Password123!' }) });
-  const { body: otherSprints } = await api('/sprints', {}, otherSignedIn.body.token);
-  const intrusion = await api(`/sprints/${otherSprints[0].id}/tasks`, { method: 'POST', body: JSON.stringify({ key: low.key }) });
+  const { body: otherBoards } = await api('/boards', {}, otherSignedIn.body.token);
+  const otherBoardId = otherBoards[0].id;
+  const { body: otherSprints } = await api(`/sprints?boardId=${encodeURIComponent(otherBoardId)}`, {}, otherSignedIn.body.token);
+  check('sprint lists are owner-scoped and start empty', () => assert.deepEqual(otherSprints, []));
+  const otherSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Other Sprint', startDate: todayIsoDate(), boardId: otherBoardId })
+  }, otherSignedIn.body.token);
+  const intrusion = await api(`/sprints/${otherSprint.body.id}/tasks`, { method: 'POST', body: JSON.stringify({ key: low.key }) });
   check('another project\'s sprint cannot receive the task', () => assert.equal(intrusion.status, 404));
 
   const bypass = await api(`/tasks/${low.key}`, { method: 'PATCH', body: JSON.stringify({ sprintId: activeSprint.id }) });
@@ -239,6 +274,26 @@ try {
 
   const invalid = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'Bad priority', priority: 'blocker' }) });
   check('invalid priority values are rejected with 400', () => assert.equal(invalid.status, 400));
+
+  const defaultEstimate = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'Default estimate task' }) });
+  check('new tasks without story points default to zero', () => {
+    assert.equal(defaultEstimate.status, 201);
+    assert.equal(defaultEstimate.body.storyPoints, 0);
+  });
+  const legacyEstimate = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'Existing scale estimate task', storyPoints: 4 }) });
+  const badEstimate = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'Out of range estimate task', storyPoints: 101 }) });
+  const fractionalEstimate = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'Fractional estimate task', storyPoints: 2.5 }) });
+  check('existing numeric estimates stay compatible while unsafe values are rejected', () => {
+    assert.equal(legacyEstimate.status, 201);
+    assert.equal(legacyEstimate.body.storyPoints, 4);
+    assert.equal(badEstimate.status, 400);
+    assert.equal(fractionalEstimate.status, 400);
+  });
+  const updatedEstimate = await api(`/tasks/${high.key}`, { method: 'PATCH', body: JSON.stringify({ storyPoints: 13 }) });
+  check('manual task edits persist Fibonacci story points', () => {
+    assert.equal(updatedEstimate.status, 200);
+    assert.equal(updatedEstimate.body.storyPoints, 13);
+  });
 
   console.log(`\n${passed} backlog checks passed.`);
 } finally {

@@ -32,6 +32,16 @@ const taskHistorySchema = new mongoose.Schema(
       required: true,
       index: true
     },
+    note: {
+      type: String,
+      default: '',
+      maxlength: 2000
+    },
+    source: {
+      type: String,
+      enum: ['status_change', 'automation'],
+      default: 'status_change'
+    },
     at: {
       type: Date,
       required: true,

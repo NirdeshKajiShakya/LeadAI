@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowRight, Bell, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
+  Activity, AlertTriangle, ArrowRight, Bolt, Bot, CalendarDays, Check, ChevronDown, CircleHelp,
   Filter, LayoutGrid, List, MessageSquare, MoreHorizontal, Pencil, Plus, Search, Settings2,
   ChevronLeft, ChevronRight,
-  PanelLeftClose, PanelLeftOpen, Sparkles, Target, UserRound, Users, X, Zap, LoaderCircle, Clock3, Mail, Shield, Trash2
+  PanelLeftClose, PanelLeftOpen, Sparkles, Target, UserRound, Users, X, Zap, LoaderCircle, Clock3, Mail, Shield, Trash2, LogOut
 } from 'lucide-react';
 import SprintBacklog from './SprintBacklog.jsx';
 import { ProfileEditPage, ProfilePage } from './Profile.jsx';
 import BellNotifications from './components/notifications/BellNotifications';
 import Dashboard from './Dashboard.jsx';
-import { isCalendarDate } from './sprintDates.js';
+import AutomationsPage from './AutomationsPage.jsx';
+import { formatDate } from './formatDate.js';
 import SettingsPage from './SettingsPage.jsx';
+import SetupWizard from './SetupWizard.jsx';
 
 const columns = [
   { id: 'backlog', label: 'Backlog', color: 'slate', hint: 'Shape the next move' },
@@ -21,10 +23,19 @@ const columns = [
 ];
 const priorityLabels = { urgent: 'P0 Urgent', high: 'P1 High', medium: 'P2 Medium', low: 'P3 Low' };
 const priorityClass = { urgent: 'priority-urgent', high: 'priority-high', medium: 'priority-medium', low: 'priority-low' };
+const storyPointOptions = [0, 1, 2, 3, 5, 8, 13];
 function initialsOf(name) {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return '?';
   return (parts[0][0] + (parts[1] ? parts[1][0] : '')).toUpperCase();
+}
+function checklistFromForm(form) {
+  try {
+    const value = JSON.parse(String(form.get('checklist') || '[]'));
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -62,9 +73,9 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dashboardRefresh, setDashboardRefresh] = useState(0);
   const [pendingTask, setPendingTask] = useState(null);
-  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [homeSummary, setHomeSummary] = useState(null);
   const [homeAiFocus, setHomeAiFocus] = useState(0);
+  const [setupRequired, setSetupRequired] = useState(false);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -79,6 +90,10 @@ function App() {
       setLoading(false);
       return () => window.removeEventListener('popstate', handlePopState);
     }
+    fetch(`${API_BASE_URL}/api/system/status`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((status) => setSetupRequired(Boolean(status?.setupRequired)))
+      .catch(() => setSetupRequired(false));
     const authHeaders = { Authorization: `Bearer ${token}` };
     fetch(`${API_BASE_URL}/api/auth/current`, { headers: authHeaders })
       .then((response) => (response.ok ? response.json() : null))
@@ -91,43 +106,33 @@ function App() {
         setActiveBoardId((current) => current || list[0]?.id || '');
       })
       .catch(() => setBoards([]));
-    fetch(`${API_BASE_URL}/api/tasks`, { headers: authHeaders }).then(async (response) => {
-      if (response.status === 401) {
-        sessionStorage.removeItem('leadai-session');
-        setToken(null);
-        return [];
-      }
-      const data = await response.json();
-      return Array.isArray(data) ? data : [];
-    }).then(setTasks).catch(() => setTasks([])).finally(() => setLoading(false));
+    setLoading(false);
     return () => window.removeEventListener('popstate', handlePopState);
   }, [token]);
 
   useEffect(() => {
-    if (!token || !activeBoardId) return;
+    let active = true;
+    setTasks([]);
+    if (!token || !activeBoardId) {
+      setLoading(false);
+      return () => { active = false; };
+    }
+    setLoading(true);
     fetch(`${API_BASE_URL}/api/tasks?boardId=${encodeURIComponent(activeBoardId)}`, {
       headers: { Authorization: `Bearer ${token}` }
     }).then(async (response) => {
-      if (!response.ok) return [];
+      if (!response.ok) throw new Error(`Could not load board tasks (HTTP ${response.status}).`);
       const data = await response.json();
       return Array.isArray(data) ? data : [];
-    }).then(setTasks).catch(() => setTasks([]));
+    }).then((data) => {
+      if (active) setTasks(data);
+    }).catch(() => {
+      if (active) setTasks([]);
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
   }, [token, activeBoardId]);
-
-  useEffect(() => {
-    setNotificationsOpen(false);
-  }, [pathname]);
-
-  useEffect(() => {
-    if (!notificationsOpen) return undefined;
-    function handlePointerDown(event) {
-      if (event.target instanceof Element && !event.target.closest('.notification-wrap')) {
-        setNotificationsOpen(false);
-      }
-    }
-    document.addEventListener('pointerdown', handlePointerDown);
-    return () => document.removeEventListener('pointerdown', handlePointerDown);
-  }, [notificationsOpen]);
 
   useEffect(() => {
     if (!boards.length) {
@@ -148,6 +153,9 @@ function App() {
   }, [tasks, pendingTask, activeBoardId]);
 
   function switchBoard(boardId) {
+    if (String(boardId) === String(activeBoardId)) return;
+    setTasks([]);
+    setHomeSummary(null);
     setActiveBoardId(boardId);
     // On Home the board selector is a workspace filter, not a navigation
     // control. Everywhere else it opens the board that was picked.
@@ -167,10 +175,10 @@ function App() {
       // unreachable; the token will simply expire on the server.
     }
     sessionStorage.removeItem('leadai-session');
-    setNotificationsOpen(false);
     setHomeSummary(null);
     setToken(null);
     setUser(null);
+    setSetupRequired(false);
   }
 
   function openBoardDialog(mode) {
@@ -234,6 +242,17 @@ function App() {
     navigate('/board');
   }
 
+  async function refreshBoards() {
+    const response = await fetch(`${API_BASE_URL}/api/boards`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !Array.isArray(payload)) {
+      throw new Error(payload?.error || `Could not refresh boards (HTTP ${response.status}).`);
+    }
+    setBoards(payload);
+  }
+
   async function handleGeneratedBoard(board) {
     if (!board?.id) return;
     try {
@@ -258,11 +277,6 @@ function App() {
   const activeBoard = boards.find((board) => board.id === activeBoardId) || null;
 const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.name ? `${user.name}'s workspace` : 'My workspace');
   const isHome = pathname === '/';
-  const now = new Date();
-  const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const overdueBoardTasks = tasks.filter((task) => (
-    task.status !== 'done' && isCalendarDate(task.dueDate) && task.dueDate < todayIso
-  ));
   const useSprintProgress = Boolean(isHome && homeSummary?.activeSprint);
   const shellProgress = useSprintProgress
     ? Math.max(0, Math.min(100, Number(homeSummary?.stats?.sprintProgress) || 0))
@@ -293,8 +307,10 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
   async function createTask(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const checklist = checklistFromForm(form);
+    if (!checklist) return setAuthError('Checklist data is invalid. Please review the task steps.');
     const estimate = Number(form.get('estimateHours'));
-    const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assigneeId: form.get('assigneeId') || null, assignee: form.get('assignee') || null, dueDate: form.get('dueDate') || null, boardId: activeBoardId, estimateHours: Number.isFinite(estimate) ? estimate : 0 };
+    const payload = { title: form.get('title'), description: form.get('description'), status: modalStatus, priority: form.get('priority'), labels: [form.get('label') || 'General'], assigneeId: form.get('assigneeId') || null, assignee: form.get('assignee') || null, dueDate: form.get('dueDate') || null, boardId: activeBoardId, estimateHours: Number.isFinite(estimate) ? estimate : 0, storyPoints: Number(form.get('storyPoints')) || 0, checklist };
     const response = await fetch(`${API_BASE_URL}/api/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
     const task = await response.json();
     if (!response.ok) return setAuthError(task.error || 'Could not create task.');
@@ -317,6 +333,8 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
   async function saveTask(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const checklist = checklistFromForm(form);
+    if (!checklist) return setAuthError('Checklist data is invalid. Please review the task steps.');
     const estimate = Number(form.get('estimateHours'));
     const payload = {
       title: form.get('title'),
@@ -328,7 +346,9 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
       assignee: form.get('assignee') || null,
       dueDate: form.get('dueDate') || null,
       boardId: activeBoardId,
-      estimateHours: Number.isFinite(estimate) ? estimate : 0
+      estimateHours: Number.isFinite(estimate) ? estimate : 0,
+      storyPoints: Number(form.get('storyPoints')) || 0,
+      checklist
     };
     const response = await fetch(`${API_BASE_URL}/api/tasks/${editingTask.key}`, {
       method: 'PATCH',
@@ -454,40 +474,7 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
       <div className="board-breadcrumb" aria-label="Page location"><span>Workspace</span><b>/</b><span>{pathname === '/team' ? 'Team & Workspace' : 'Projects'}</span>{pathname !== '/team' && <><b>/</b><label className="board-name-control"><span className="workspace-dot"></span><select value={activeBoardId} onChange={(event) => switchBoard(event.target.value)} aria-label="Current kanban board" disabled={!boards.length}><option value="">{boards.length ? 'Select a board' : 'No boards yet'}</option>{boards.map((board) => <option key={board.id} value={board.id}>{board.name}</option>)}</select><ChevronDown size={13} /></label>{boards.find((board) => board.id === activeBoardId)?.isOwner && <button className="board-edit-button" onClick={() => openBoardDialog('rename')} aria-label="Rename current board" title="Rename current board"><Pencil size={13} /></button>}<button className="board-control-button" onClick={() => openBoardDialog('create')}><Plus size={14} /> New board</button></>}</div>
       <div className="topbar-actions">
         <label className="global-search"><Search size={15} aria-hidden="true" /><input placeholder="Search tasks..." aria-label="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && isHome) { event.preventDefault(); navigate('/board'); } }} /></label>
-        <div className="notification-wrap">
-          <IconButton label={overdueBoardTasks.length ? `Notifications: ${overdueBoardTasks.length} overdue` : 'Notifications'} active={notificationsOpen} onClick={() => setNotificationsOpen((open) => !open)}>
-            <Bell size={16} />
-            {overdueBoardTasks.length > 0 && <span className="home-notification-dot" aria-hidden="true" />}
-          </IconButton>
-          {notificationsOpen && (
-            <>
-              <section className="home-notifications" role="dialog" aria-label="Notifications">
-                <header>
-                  <div>
-                    <strong>Notifications</strong>
-                    <span>{overdueBoardTasks.length ? `${overdueBoardTasks.length} overdue on ${activeBoard?.name || 'this board'}` : `No overdue tasks on ${activeBoard?.name || 'this board'}`}</span>
-                  </div>
-                  <button type="button" onClick={() => setNotificationsOpen(false)} aria-label="Close notifications"><X size={14} /></button>
-                </header>
-                {overdueBoardTasks.length ? (
-                  <ul>
-                    {overdueBoardTasks.slice(0, 4).map((task) => (
-                      <li key={task.key}>
-                        <button type="button" onClick={() => { setNotificationsOpen(false); openDashboardTask(task); }}>
-                          <span className="home-notification-icon"><AlertTriangle size={13} aria-hidden="true" /></span>
-                          <span><strong>{task.key} · {task.title}</strong><small>Due {task.dueDate} · {task.assignee || 'Unassigned'}</small></span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="home-notifications-empty"><Check size={14} aria-hidden="true" /> You are clear. No overdue tasks on this board.</p>
-                )}
-                <footer><button type="button" onClick={() => { setNotificationsOpen(false); navigate('/backlog'); }}>Open sprint backlog <ArrowRight size={12} aria-hidden="true" /></button></footer>
-              </section>
-            </>
-          )}
-        </div>
+        <BellNotifications token={token} onInvitationAccepted={refreshBoards} />
         <button type="button" className="text-button" onClick={signOut}>Sign Out</button>
         <button type="button" className="profile-avatar" aria-label="Open your profile" title="Your profile" onClick={() => navigate('/profile')}>{user?.avatar ? <img src={user.avatar} alt="" /> : initialsOf(user?.name)}<span></span></button>
       </div>
@@ -515,20 +502,22 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
           onSessionExpired={handleSessionExpired}
           activeBoardId={activeBoardId}
           boards={boards}
+          onSelectBoard={switchBoard}
           boardTasks={tasks}
           onSummary={setHomeSummary}
           focusAiKey={homeAiFocus}
-        /> : pathname === '/backlog' ? <SprintBacklog token={token} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} navigate={navigate} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname === '/settings' ? <SettingsPage token={token} navigate={navigate} /> : pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
+        /> : pathname === '/backlog' ? <SprintBacklog token={token} activeBoardId={activeBoardId} activeBoardName={activeBoard?.name || ''} /> : pathname === '/team' ? <BoardManager token={token} boards={boards} setBoards={setBoards} activeBoardId={activeBoardId} navigate={navigate} user={user} /> : pathname === '/automations' ? <AutomationsPage token={token} activeBoardId={activeBoardId} activeBoard={activeBoard} /> : pathname === '/profile' ? <ProfilePage token={token} navigate={navigate} /> : pathname === '/profile/edit' ? <ProfileEditPage token={token} navigate={navigate} onUserChange={updateProfileUser} /> : pathname === '/settings' ? <SettingsPage token={token} navigate={navigate} /> : pathname !== '/board' ? <RoutePage pathname={pathname} navigate={navigate} user={user} onSignIn={authenticate} /> : boards.length === 0 ? <BoardEmptyState onCreate={() => openBoardDialog('create')} onManage={() => navigate('/team')} /> : <>
         <div className="context-strip"><div className="breadcrumbs"><span>Workspace</span><ChevronDown size={13} /><strong>{workspaceName}</strong><span className="live-pill"><i></i> Synced</span></div><div className="metric-badges"><Metric label="Total" value={`${tasks.length} Tasks`} /><Metric label="In Flight" value={inFlight} dot="cyan" /><Metric label="Completed" value={completed} dot="green" /><Metric label="Completion" value={`${completionRate}%`} icon={<Activity size={13} />} /></div></div>
-        <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{activeBoard ? `${activeBoard.name}` : (user?.name ? `${user.name}'s board` : 'My board')};</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
+        <section className="page-heading"><div><div className="eyebrow">Your workspace</div><h1>{activeBoard ? activeBoard.name.replace(/;$/, '') : (user?.name ? `${user.name}'s board` : 'My board')}</h1><p>Organize your work, track progress, and keep everything moving.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setCopilotOpen(!copilotOpen)}><Bot size={15} /> {copilotOpen ? 'Hide' : 'Show'} Copilot</button><button className="primary-button" onClick={() => { setModalStatus('todo'); setShowModal(true); }}><Plus size={16} /> Add Task</button></div></section>
         <section className="control-bar"><label className="filter-search"><Search size={15} /><input placeholder="Filter tasks, branches, tickets..." value={query} onChange={(event) => setQuery(event.target.value)} /></label><div className="avatar-stack"><span>{initialsOf(user?.name)}</span></div><div className="label-filters"><button className={activeLabel === 'All' ? 'selected' : ''} onClick={() => setActiveLabel('All')}>All ({tasks.length})</button>{labels.map((label) => <button key={label} className={activeLabel === label ? 'selected' : ''} onClick={() => setActiveLabel(label)}><i></i>{label}</button>)}</div><div className="view-controls"><Filter size={14} /><select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="all">Priority: All</option><option value="urgent">P0 - Urgent</option><option value="high">P1 - High</option><option value="medium">P2 - Medium</option><option value="low">P3 - Low</option></select><IconButton label="Kanban view" active={viewMode === 'board'} onClick={() => setViewMode('board')}><LayoutGrid size={16} /></IconButton><IconButton label="List view" active={viewMode === 'list'} onClick={() => setViewMode('list')}><List size={16} /></IconButton></div></section>
-        <div className="board-layout"><section className={viewMode === 'list' ? 'task-list-view' : 'board-canvas'}>{loading ? <div className="loading-state">Loading your sprint board...</div> : viewMode === 'list' ? <TaskList tasks={filteredTasks} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} /> : columns.map((column) => <BoardColumn key={column.id} column={column} tasks={filteredTasks.filter((task) => task.status === column.id)} onDrop={handleDrop} onAdd={() => openCreate(column.id)} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} />)}</section></div>{copilotOpen && (<><div className="copilot-backdrop is-open" onClick={() => setCopilotOpen(false)}></div><aside className="copilot is-open"><Copilot messages={copilotMessages} input={copilotInput} setInput={setCopilotInput} onSubmit={sendCopilot} onClose={() => setCopilotOpen(false)} isAnalyzing={isAnalyzing} /></aside></>)}
+        <div className="board-layout"><section className={viewMode === 'list' ? 'task-list-view' : 'board-canvas'}>{loading ? <div className="loading-state">Loading your sprint board...</div> : viewMode === 'list' ? <TaskList tasks={filteredTasks} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} /> : columns.map((column) => <BoardColumn key={column.id} column={column} tasks={filteredTasks.filter((task) => task.status === column.id)} onDrop={handleDrop} onAdd={() => openCreate(column.id)} onMove={updateTask} onEdit={openEdit} onDelete={deleteTask} />)}</section></div>{copilotOpen && (<><div className="copilot-backdrop is-open" onClick={() => setCopilotOpen(false)}></div><aside className="copilot is-open"><Copilot messages={copilotMessages} input={copilotInput} setInput={setCopilotInput} onSubmit={sendCopilot} onClose={() => setCopilotOpen(false)} isAnalyzing={isAnalyzing} aiConfigured={aiConfigured} /></aside></>)}
         <section className="velocity-panel"><div><div className="eyebrow">Your progress</div><h2>Here is how your board is tracking right now</h2></div><div className="velocity-stats"><div><strong>{tasks.length}</strong><span>Total tasks</span></div><div><strong>{inFlight}</strong><span>In progress</span></div><div><strong>{completed}</strong><span>Completed</span></div></div></section>
         {showModal && <TaskModal status={modalStatus} task={editingTask} onClose={() => { setShowModal(false); setEditingTask(null); }} onSubmit={editingTask ? saveTask : createTask} assignees={boards.find((board) => board.id === activeBoardId)?.members?.map((member) => member.name) || (user?.name ? [user.name] : [])} />}
         </>}
         {boardDialog && <BoardDialog mode={boardDialog} name={boardName} setName={setBoardName} busy={boardBusy} onClose={() => setBoardDialog(null)} onSubmit={saveBoard} />}
       </main>
     </div>
+    {setupRequired && <SetupWizard token={token} onComplete={() => setSetupRequired(false)} />}
   </div>;
 }
 
@@ -540,13 +529,57 @@ function AuthScreen({ mode, setMode, error, busy, onSubmit }) {
 function Metric({ label, value, dot, icon }) { return <div className="metric"><span>{dot && <i className={`metric-dot ${dot}`}></i>}{icon}{label}</span><strong>{value}</strong></div>; }
 function BoardColumn({ column, tasks, onDrop, onAdd, onMove, onEdit, onDelete }) { return <div className={`board-column column-${column.color}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => onDrop(event, column.id)}><div className="column-header"><div><span className="column-title"><i></i>{column.label}<b>{tasks.length}</b></span><small>{column.hint}</small></div><IconButton label={`Add task to ${column.label}`} onClick={onAdd}><Plus size={17} /></IconButton></div><div className="task-list">{tasks.map((task) => <TaskCard key={task.key} task={task} onMove={onMove} onEdit={onEdit} onDelete={onDelete} />)}{tasks.length === 0 && <div className="empty-column">Drop work here</div>}</div></div>; }
 function formatDue(value) {
-  if (!value) return 'Unscheduled';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatDate(value) || 'Unscheduled';
 }
-function TaskCard({ task, onMove, onEdit, onDelete }) { return <article className={`task-card ${task.status === 'done' ? 'is-done' : ''}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}><div className="task-topline"><span className="task-key">#{task.key}</span><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span></div><h3>{task.title}</h3><p>{task.description}</p><div className="task-labels">{task.labels.map((label) => <span key={label}>{label}</span>)}</div>{task.aiSuggested && <div className="ai-note"><Sparkles size={12} /> AI suggested</div>}<div className="task-footer"><div className="task-footer-details"><span className="assignee"><i>{initialsOf(task.assignee)}</i><b>{task.assignee}</b></span><span className="task-meta"><CalendarDays size={13} />{task.dueDate || 'No due date'}</span></div><div className="task-footer-actions"><select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button><button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button></div></div></article>; }
-function TaskList({ tasks, onMove, onEdit, onDelete }) { return <div className="task-table"><div className="task-table-head"><span>Task</span><span>Status</span><span>Priority</span><span>Assignee</span><span>Due</span><span>Actions</span></div>{tasks.length ? tasks.map((task) => <div className="task-table-row" key={task.key}><div><strong>#{task.key}</strong><span>{task.title}</span></div><select aria-label={`Status for ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span><span>{task.assignee}</span><span>{task.dueDate}</span><span className="row-actions"><button type="button" onClick={() => onEdit(task)}>Edit</button><button type="button" onClick={() => onDelete(task)}>Delete</button></span></div>) : <div className="empty-column">No tasks match the current filters.</div>}</div>; }
+function TaskCard({ task, onMove, onEdit, onDelete }) {
+  const storyPoints = Number.isInteger(Number(task.storyPoints)) && Number(task.storyPoints) > 0 ? Number(task.storyPoints) : 0;
+  const labels = Array.isArray(task.labels) ? task.labels : [];
+
+  return (
+    <article
+      className={`task-card ${task.status === 'done' ? 'is-done' : ''}`}
+      draggable
+      onDragStart={(event) => event.dataTransfer.setData('text/plain', task.key)}
+    >
+      <div className="task-topline">
+        <span className="task-key">#{task.key}</span>
+        <span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span>
+        {task.automationFlags?.overdueEscalated && task.status !== 'done' && <span className="task-overdue-flag"><AlertTriangle size={11} /> Overdue</span>}
+        <span className="task-story-points">
+          {task.aiSuggested && <Sparkles size={11} aria-hidden="true" />}
+          {storyPoints} SP
+        </span>
+      </div>
+      <h3>{task.title}</h3>
+      {task.description && <p>{task.description}</p>}
+      {(labels.length > 0 || task.aiSuggested) && (
+        <div className="task-card-tags">
+          <div className="task-labels">
+            {labels.map((label) => <span key={label}>{label}</span>)}
+          </div>
+          {task.aiSuggested && <span className="ai-note"><Sparkles size={11} /> AI suggested</span>}
+        </div>
+      )}
+      <div className="task-footer">
+        <div className="task-footer-details">
+          <span className="assignee">
+            <i>{initialsOf(task.assignee)}</i>
+            <b>{task.assignee || 'Unassigned'}</b>
+          </span>
+          <span className="task-meta"><CalendarDays size={13} />{formatDue(task.dueDate)}</span>
+        </div>
+        <div className="task-footer-actions">
+          <select className="status-select" aria-label={`Move ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>
+            {columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}
+          </select>
+          <button type="button" className="task-menu" aria-label={`Edit ${task.key}`} onClick={() => onEdit(task)}><MoreHorizontal size={15} /></button>
+          <button type="button" className="task-menu" aria-label={`Delete ${task.key}`} onClick={() => onDelete(task)}><X size={14} /></button>
+        </div>
+      </div>
+    </article>
+  );
+}
+function TaskList({ tasks, onMove, onEdit, onDelete }) { return <div className="task-table"><div className="task-table-head"><span>Task</span><span>Status</span><span>Priority</span><span>Assignee</span><span>Due</span><span>Actions</span></div>{tasks.length ? tasks.map((task) => <div className="task-table-row" key={task.key}><div><strong>#{task.key}</strong><span>{task.title}</span></div><select aria-label={`Status for ${task.key}`} value={task.status} onChange={(event) => onMove(task.key, { status: event.target.value })}>{columns.map((column) => <option key={column.id} value={column.id}>{column.label}</option>)}</select><span className={`priority ${priorityClass[task.priority]}`}>{priorityLabels[task.priority]}</span><span>{task.assignee}</span><span>{formatDue(task.dueDate)}</span><span className="row-actions"><button type="button" onClick={() => onEdit(task)}>Edit</button><button type="button" onClick={() => onDelete(task)}>Delete</button></span></div>) : <div className="empty-column">No tasks match the current filters.</div>}</div>; }
 function BoardEmptyState({ onCreate, onManage }) {
   return <section className="board-empty-state"><div className="board-empty-icon"><LayoutGrid size={25} /></div><div className="eyebrow">Your workspace is ready</div><h1>Create your first kanban board</h1><p>Boards keep projects, tasks, and collaborators organized. Create one now to start planning your work.</p><div className="board-empty-actions"><button className="primary-button" onClick={onCreate}><Plus size={16} /> Create a board</button><button className="secondary-button" onClick={onManage}>Open board management</button></div></section>;
 }
@@ -554,7 +587,7 @@ function BoardDialog({ mode, name, setName, busy, onClose, onSubmit }) {
   const isRename = mode === 'rename';
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><form className="task-modal board-dialog" onSubmit={onSubmit}><div className="modal-heading"><div><div className="eyebrow">{isRename ? 'Board settings' : 'New board'}</div><h2>{isRename ? 'Rename board' : 'Create a board'}</h2></div><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={17} /></button></div><p className="board-dialog-copy">{isRename ? 'Choose a name that helps your team recognize this workspace.' : 'Give your new workspace a clear name. You can invite collaborators after it is created.'}</p><label>Board name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} placeholder="e.g. Website launch" autoFocus required /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Saving...' : isRename ? 'Save name' : 'Create board'}</button></div></form></div>;
 }
-function Copilot({ messages, input, setInput, onSubmit, onClose, isAnalyzing }) {
+function Copilot({ messages, input, setInput, onSubmit, onClose, isAnalyzing, aiConfigured }) {
   const streamRef = useRef(null);
 
   useEffect(() => {
@@ -579,7 +612,7 @@ function Copilot({ messages, input, setInput, onSubmit, onClose, isAnalyzing }) 
 
   return <div className="copilot-content">
     <div className="copilot-header">
-      <div className="copilot-title"><span className="copilot-icon"><Bot size={17} /></span><div><strong>LeadAI Copilot</strong><small><i></i> Connected</small></div></div>
+      <div className="copilot-title"><span className="copilot-icon"><Bot size={17} /></span><div><strong>LeadAI Copilot</strong><small><i className={aiConfigured === false ? 'is-limited' : ''}></i>{aiConfigured === false ? 'Basic mode' : aiConfigured ? 'AI active' : 'Checking status'}</small></div></div>
       <div className="copilot-actions"><span className="copilot-live-badge">Live</span><IconButton label="Close Copilot" onClick={onClose}><X size={16} /></IconButton></div>
     </div>
     <div className="chat-stream" ref={streamRef} aria-live="polite">
@@ -596,7 +629,7 @@ function Copilot({ messages, input, setInput, onSubmit, onClose, isAnalyzing }) 
     </form>
   </div>;
 }
-function BoardManager({ token, boards, setBoards, navigate }) {
+function BoardManager({ token, boards, setBoards, navigate, user }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [role, setRole] = useState('Member');
@@ -649,6 +682,15 @@ function BoardManager({ token, boards, setBoards, navigate }) {
     try { await request(`/api/boards/${board.id}`, { method: 'DELETE' }); setError(''); setMenuBoardId(null); await refresh(); }
     catch (requestError) { setError(requestError.message); }
   }
+  async function leave(board) {
+    if (!window.confirm(`Leave "${board.name}"? You will lose access to its tasks.`)) return;
+    try {
+      await request(`/api/boards/${board.id}/members/${user?._id}`, { method: 'DELETE' });
+      setError('');
+      setMenuBoardId(null);
+      await refresh();
+    } catch (requestError) { setError(requestError.message); }
+  }
   async function invite(event) {
     event.preventDefault();
     if (!selectedBoard) return;
@@ -664,7 +706,7 @@ function BoardManager({ token, boards, setBoards, navigate }) {
     const stat = stats[board.id] || { total: 0, done: 0, updatedAt: 0 };
     const percent = stat.total ? Math.round((stat.done / stat.total) * 100) : 0;
     return <article className="team-board-card" key={board.id}>
-      <div className="team-board-card-head"><span className={`team-role-badge ${board.isOwner ? 'is-owner' : ''}`}>{board.isOwner ? 'Owner' : 'Member'}</span><div className="team-menu-wrap"><button className="team-icon-button" onClick={() => setMenuBoardId(menuBoardId === board.id ? null : board.id)} aria-label={`Actions for ${board.name}`}><MoreHorizontal size={18} /></button>{menuBoardId === board.id && <div className="team-action-menu"><button onClick={() => rename(board)}><Pencil size={14} /> Rename</button>{board.isOwner && <button className="is-danger" onClick={() => remove(board)}><Trash2 size={14} /> Delete</button>}</div>}</div></div>
+      <div className="team-board-card-head"><span className={`team-role-badge ${board.isOwner ? 'is-owner' : ''}`}>{board.isOwner ? 'Owner' : 'Member'}</span><div className="team-menu-wrap"><button className="team-icon-button" onClick={() => setMenuBoardId(menuBoardId === board.id ? null : board.id)} aria-label={`Actions for ${board.name}`}><MoreHorizontal size={18} /></button>{menuBoardId === board.id && <div className="team-action-menu">{board.isOwner ? <><button onClick={() => rename(board)}><Pencil size={14} /> Rename</button><button className="is-danger" onClick={() => remove(board)}><Trash2 size={14} /> Delete</button></> : <button className="is-danger" onClick={() => leave(board)}><LogOut size={14} /> Leave board</button>}</div>}</div></div>
       <button className="team-board-open" onClick={() => navigate(`/board?boardId=${encodeURIComponent(board.id)}`)}><h3>{board.name}</h3><p>{board.isOwner ? 'Your workspace board for focused delivery.' : 'A board shared with you for collaboration.'}</p><div className="team-board-meta"><span><Users size={14} /> {board.memberIds.length} member{board.memberIds.length === 1 ? '' : 's'}</span><span><Clock3 size={14} /> {formatActive(stat.updatedAt)}</span></div></button>
       <div className="team-board-footer"><div className="team-member-stack">{(board.members || []).slice(0, 4).map((member) => <span key={member.id} title={member.email}>{initials(member)}</span>)}{board.members?.length > 4 && <span className="is-more">+{board.members.length - 4}</span>}</div><span className="team-completion"><Check size={13} /> {percent}% complete</span></div>
       {board.isOwner && <button className="team-invite-link" onClick={() => { setSelectedBoard(board); setModal('invite'); }}><Mail size={14} /> Invite member</button>}
@@ -695,6 +737,10 @@ function RoutePage({ pathname, navigate, user, onSignIn }) {
 function TaskModal({ status, task, onClose, onSubmit, assignees }) {
   const options = assignees && assignees.length ? assignees : ['Unassigned'];
   const [dueDate, setDueDate] = useState(/^\d{4}-\d{2}-\d{2}$/.test(task?.dueDate || '') ? task.dueDate : '');
+  const [checklistItems, setChecklistItems] = useState(() => Array.isArray(task?.checklist) ? task.checklist : []);
+  const [checklistDraft, setChecklistDraft] = useState('');
+  const currentStoryPoints = Number.isInteger(Number(task?.storyPoints)) && Number(task?.storyPoints) >= 0 && Number(task?.storyPoints) <= 100 ? Number(task.storyPoints) : 0;
+  const estimateOptions = storyPointOptions.includes(currentStoryPoints) ? storyPointOptions : [...storyPointOptions, currentStoryPoints].sort((a, b) => a - b);
   function chooseDueDate(value) {
     if (value === 'none') return setDueDate('');
     const date = new Date();
@@ -702,12 +748,41 @@ function TaskModal({ status, task, onClose, onSubmit, assignees }) {
     date.setDate(date.getDate() + Number(value));
     setDueDate(date.toISOString().slice(0, 10));
   }
+  function addChecklistItems() {
+    const additions = checklistDraft.split('\n').map((text) => text.trim()).filter(Boolean);
+    if (!additions.length) return;
+    setChecklistItems((current) => [...current, ...additions.map((text) => ({ text, completed: false }))]);
+    setChecklistDraft('');
+  }
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <form className="task-modal" onSubmit={onSubmit}>
       <div className="modal-heading"><div><div className="eyebrow">{task ? 'Edit work' : 'New work'}</div><h2>{task ? 'Edit task' : 'Create task'}</h2><p className="modal-subtitle">Capture the outcome, urgency, owner, and delivery date in one place.</p></div><IconButton label="Close dialog" onClick={onClose}><X size={17} /></IconButton></div>
       <label>Task title<input name="title" autoFocus required defaultValue={task?.title || ''} placeholder="e.g. Add rate limiting to API gateway" /></label>
       <label>Description<textarea name="description" rows="4" defaultValue={task?.description || ''} placeholder="What needs to be done, and what does done look like?" /></label>
       <div className="form-grid"><label>Priority<select name="priority" defaultValue={task?.priority || 'medium'}><option value="urgent">P0 Urgent</option><option value="high">P1 High</option><option value="medium">P2 Medium</option><option value="low">P3 Low</option></select></label><label>Assignee<select name="assignee" defaultValue={task?.assignee || 'Unassigned'}><option>Unassigned</option>{options.filter((name) => name !== 'Unassigned').map((name) => <option key={name}>{name}</option>)}</select></label></div>
+      <label>Story points<select name="storyPoints" defaultValue={currentStoryPoints}>{estimateOptions.map((points) => <option key={points} value={points}>{points === 0 ? 'Not estimated' : `${points} SP${storyPointOptions.includes(points) ? '' : ' · Existing estimate'}`}</option>)}</select></label>
+      <div className="task-checklist-editor">
+        <div className="task-checklist-heading"><strong>Checklist</strong><span>{checklistItems.filter((item) => item.completed).length}/{checklistItems.length} complete</span></div>
+        {checklistItems.map((item, index) => (
+          <div className="task-checklist-row" key={`${index}-${item.text}`}>
+            <input
+              type="checkbox"
+              aria-label={`Complete ${item.text}`}
+              checked={Boolean(item.completed)}
+              onChange={(event) => setChecklistItems((current) => current.map((entry, itemIndex) => itemIndex === index
+                ? { ...entry, completed: event.target.checked }
+                : entry))}
+            />
+            <span className={item.completed ? 'is-complete' : ''}>{item.text}</span>
+            <button type="button" aria-label={`Remove ${item.text}`} onClick={() => setChecklistItems((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={13} /></button>
+          </div>
+        ))}
+        <input type="hidden" name="checklist" value={JSON.stringify(checklistItems)} readOnly />
+        <div className="task-checklist-add">
+          <textarea aria-label="New checklist items" rows="2" placeholder="Add steps, one per line…" value={checklistDraft} onChange={(event) => setChecklistDraft(event.target.value)} />
+          <button type="button" className="secondary-button" onClick={addChecklistItems} disabled={!checklistDraft.trim()}>Add steps</button>
+        </div>
+      </div>
       <div className="form-grid"><label>Label<input name="label" defaultValue={task?.labels?.[0] || ''} placeholder="Frontend, API, Design..." /></label><div className="date-field"><label htmlFor="task-due-date">Due date</label><div className="date-input-row"><input id="task-due-date" name="dueDate" type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} aria-label="Due date" /><select value="" onChange={(event) => chooseDueDate(event.target.value)} aria-label="Choose due date shortcut"><option value="">Choose date</option><option value="today">Today</option><option value="1">Tomorrow</option><option value="7">Next week</option><option value="none">No due date</option></select></div></div></div>
       <div className="ai-planning-hint"><Sparkles size={15} /><span><strong>AI-ready fields</strong> Copilot can infer descriptions, priorities, owners, and date-only deadlines from a project brief.</span></div>
       <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">{task ? 'Save changes' : <><Plus size={15} /> Add to {columns.find((column) => column.id === status)?.label}</>}</button></div>

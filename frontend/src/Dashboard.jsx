@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowRight, ArrowUpRight, Bot, CalendarDays, Check,
-  CheckCircle2, CircleDot, Filter, GitBranch, LayoutGrid, Loader2, Moon,
-  MoreHorizontal, Plus, Send, Sparkles, Zap
+  Activity, ArrowRight, ArrowUpRight, Bot, CalendarDays, CheckCircle2,
+  CircleDot, GitBranch, LayoutGrid, Loader2, Plus, Send, Sparkles
 } from 'lucide-react';
 import { formatDateRange, isCalendarDate } from './sprintDates.js';
+import { formatDate } from './formatDate.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -24,67 +24,9 @@ const priorityMeta = {
 };
 
 const previewStages = [
-  {
-    id: 'ready',
-    title: <>Ready<br />For Dev</>,
-    statuses: ['backlog', 'todo'],
-    limit: 2,
-    hint: 'Backlog + To Do'
-  },
-  {
-    id: 'flight',
-    title: <>In<br />Flight</>,
-    statuses: ['progress', 'review'],
-    limit: 2,
-    hint: 'Active execution'
-  },
-  {
-    id: 'done',
-    title: <>Done /<br />Verified</>,
-    statuses: ['done'],
-    limit: 1,
-    hint: 'Verified outcomes',
-    insight: true
-  }
-];
-
-const features = [
-  {
-    id: 'dark',
-    icon: Moon,
-    tone: 'lavender',
-    title: 'Deep Dark & Charcoal UX',
-    body: 'Engineered for minimal eye fatigue during extended terminal and IDE sessions with customizable matte slate-gray surfaces.',
-    foot: 'Zero bright white flashes',
-    footIcon: <i className="home-feature-dot" />
-  },
-  {
-    id: 'ai',
-    icon: Bot,
-    tone: 'cyan',
-    title: 'Context-Aware AI Assistant',
-    body: 'Chat directly with your sprint backlog. Generate acceptance criteria, split epics into atomic subtasks, and trace dependencies.',
-    foot: 'Board & sprint context',
-    footIcon: <Check size={12} />
-  },
-  {
-    id: 'workflow',
-    icon: Zap,
-    tone: 'green',
-    title: 'Automated Workflow Triggers',
-    body: 'Move work through Backlog, To Do, In Progress, Review, and Done in one click. Board state stays in sync with the tasks your team updates.',
-    foot: 'One-click stage moves',
-    footIcon: <Check size={12} />
-  },
-  {
-    id: 'velocity',
-    icon: Activity,
-    tone: 'cyan',
-    title: 'Sprint Velocity Intelligence',
-    body: 'Track real sprint progress, task completion, and overdue work from the same board your team uses every day.',
-    foot: 'Live sprint progress',
-    footIcon: <Activity size={12} />
-  }
+  { id: 'ready', title: 'Ready for Dev', statuses: ['backlog', 'todo'] },
+  { id: 'flight', title: 'In Flight', statuses: ['progress', 'review'] },
+  { id: 'done', title: 'Done', statuses: ['done'] }
 ];
 
 function initialsOf(name) {
@@ -94,10 +36,7 @@ function initialsOf(name) {
 }
 
 function shortDate(value) {
-  if (!value) return '';
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return formatDate(value);
 }
 
 function badgeForTask(task) {
@@ -157,47 +96,6 @@ function PreviewTaskCard({ task, onOpenTask }) {
   );
 }
 
-function SprintInsight({ activeSprint, navigate }) {
-  const progress = activeSprint?.progress || {};
-  const percent = Math.max(0, Math.min(100, Number(progress.progressPercent) || 0));
-  const detail = activeSprint
-    ? `${progress.completed || 0} of ${progress.total || 0} tasks complete${progress.totalStoryPoints ? ` · ${progress.completedStoryPoints || 0}/${progress.totalStoryPoints} story points` : ''}.`
-    : 'No active sprint yet. Plan one to track real progress here.';
-
-  return (
-    <div className="home-insight">
-      <div className="home-insight-head">
-        <Activity size={15} aria-hidden="true" />
-        <strong>{activeSprint ? 'Sprint Insight' : 'Sprint Not Started'}</strong>
-      </div>
-      <p>{detail}</p>
-      <div
-        className="home-insight-bar"
-        role="progressbar"
-        aria-label="Sprint progress"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent}
-      >
-        <span style={{ width: `${percent}%` }} />
-      </div>
-      <button type="button" onClick={() => navigate('/backlog')}>
-        {activeSprint ? 'Open sprint' : 'Plan a sprint'} <ArrowRight size={12} aria-hidden="true" />
-      </button>
-    </div>
-  );
-}
-
-function SectionHead({ kicker, title, copy, centered = true, id }) {
-  return (
-    <header className={`home-section-head ${centered ? 'is-centered' : ''}`}>
-      <span className="home-kicker">{kicker}</span>
-      <h2 id={id}>{title}</h2>
-      {copy && <p>{copy}</p>}
-    </header>
-  );
-}
-
 export default function Dashboard({
   token,
   user,
@@ -211,27 +109,18 @@ export default function Dashboard({
   activeBoardId = '',
   boards = [],
   boardTasks = [],
+  onSelectBoard,
   onSummary,
   focusAiKey = 0
 }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [reloadKey, setReloadKey] = useState(0);
 
   const [goal, setGoal] = useState('');
-  const [messages, setMessages] = useState([
-    {
-      id: 'welcome',
-      role: 'assistant',
-      text: 'Describe what you are building. I will turn the brief into a prioritised board with tasks you can refine.'
-    }
-  ]);
   const [generating, setGenerating] = useState(false);
   const [aiError, setAiError] = useState('');
 
   const aiInputRef = useRef(null);
-  const threadRef = useRef(null);
   const onSummaryRef = useRef(onSummary);
   const onSessionExpiredRef = useRef(onSessionExpired);
 
@@ -246,31 +135,36 @@ export default function Dashboard({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError('');
-    fetch(`${API_BASE_URL}/api/dashboard/summary`, { headers: { Authorization: `Bearer ${token}` } })
+    setSummary(null);
+    onSummaryRef.current?.(null);
+    const boardQuery = `?boardId=${encodeURIComponent(activeBoardId)}`;
+    fetch(`${API_BASE_URL}/api/dashboard/summary${boardQuery}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(async (response) => {
         if (response.status === 401) {
           onSessionExpiredRef.current?.();
           return null;
         }
         const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error || `Could not load your workspace (HTTP ${response.status}).`);
+        if (!response.ok) throw new Error('Workspace summary unavailable.');
         return body;
       })
       .then((data) => {
-        if (!cancelled && data) {
+        if (!cancelled) {
           setSummary(data);
           onSummaryRef.current?.(data);
         }
       })
-      .catch((requestError) => {
-        if (!cancelled) setError(requestError.message || 'Could not reach the LeadAI API. Start the backend, then retry.');
+      .catch(() => {
+        if (!cancelled) {
+          setSummary(null);
+          onSummaryRef.current?.(null);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [token, refreshKey, reloadKey]);
+  }, [token, refreshKey, activeBoardId]);
 
   useEffect(() => {
     if (!focusAiKey) return;
@@ -280,14 +174,10 @@ export default function Dashboard({
     node.focus({ preventScroll: true });
   }, [focusAiKey]);
 
-  useEffect(() => {
-    if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
-  }, [messages, generating, aiError]);
-
-  const stats = summary?.stats || null;
-  const activeSprint = summary?.activeSprint || null;
-  const summaryBoards = useMemo(() => summary?.boards || [], [summary]);
-  const priorityTasks = useMemo(() => summary?.priorityTasks || [], [summary]);
+  const stats = summary?.stats && typeof summary.stats === 'object' ? summary.stats : null;
+  const activeSprint = summary?.activeSprint && typeof summary.activeSprint === 'object' ? summary.activeSprint : null;
+  const summaryBoards = useMemo(() => (Array.isArray(summary?.boards) ? summary.boards : []), [summary]);
+  const priorityTasks = useMemo(() => (Array.isArray(summary?.priorityTasks) ? summary.priorityTasks : []), [summary]);
   const allBoards = boards.length ? boards : summaryBoards;
   const activeBoard = allBoards.find((board) => String(board.id) === String(activeBoardId)) || allBoards[0] || null;
   const currentBoardId = activeBoardId || activeBoard?.id || '';
@@ -297,55 +187,13 @@ export default function Dashboard({
   // says is selected. While no board exists we fall back to the summary list so
   // a brand new workspace still has a useful, real-data empty shell.
   const scopedTasks = useMemo(() => (
-    (boardTasks || []).filter((task) => !currentBoardId || String(task.boardId) === String(currentBoardId))
+    (Array.isArray(boardTasks) ? boardTasks : []).filter((task) => !currentBoardId || String(task.boardId) === String(currentBoardId))
   ), [boardTasks, currentBoardId]);
   const previewTasks = currentBoardId ? scopedTasks : priorityTasks;
-  const openPreviewTasks = previewTasks.filter((task) => task.status !== 'done').length;
-
   const stages = useMemo(() => previewStages.map((stage) => {
     const tasks = previewTasks.filter((task) => stage.statuses.includes(task.status));
-    return { ...stage, tasks, total: tasks.length };
+    return { ...stage, tasks };
   }), [previewTasks]);
-
-  const sprintRange = activeSprint && isCalendarDate(activeSprint.startDate) && isCalendarDate(activeSprint.endDate)
-    ? formatDateRange(activeSprint.startDate, activeSprint.endDate)
-    : '';
-
-  const proofBoards = allBoards.slice(0, 4);
-  const proofMetrics = [
-    {
-      id: 'sprint',
-      value: stats ? `${stats.sprintProgress}%` : '—',
-      label: 'Sprint Completion',
-      description: activeSprint
-        ? `${activeSprint.progress?.completed || 0} of ${activeSprint.progress?.total || 0} tasks complete${sprintRange ? ` · ${sprintRange}` : ''}.`
-        : 'No active sprint. Plan one from the Sprint Backlog to start tracking.',
-      tone: 'lavender',
-      onClick: () => navigate('/backlog')
-    },
-    {
-      id: 'boards',
-      value: stats ? stats.boards : '—',
-      label: 'Active Boards',
-      description: stats
-        ? `${stats.myOpenTasks} open task${stats.myOpenTasks === 1 ? '' : 's'} assigned to you across your workspace.`
-        : 'Loading workspace summary…',
-      tone: 'cyan',
-      onClick: () => navigate('/team')
-    },
-    {
-      id: 'overdue',
-      value: stats ? stats.overdueTasks : '—',
-      label: 'Overdue Tasks',
-      description: stats
-        ? stats.overdueTasks
-          ? 'Past a real due date and still open. Clear the blockers from your board.'
-          : 'Nothing is overdue across your boards right now.'
-        : 'Loading workspace summary…',
-      tone: 'green',
-      onClick: () => navigate('/board')
-    }
-  ];
 
   function focusGenerator() {
     const node = aiInputRef.current;
@@ -364,8 +212,6 @@ export default function Dashboard({
       return;
     }
 
-    const userMessage = { id: `user-${Date.now()}`, role: 'user', text: trimmedGoal };
-    setMessages((current) => [...current, userMessage]);
     setGoal('');
     setAiError('');
     setGenerating(true);
@@ -384,390 +230,166 @@ export default function Dashboard({
       if (!response.ok) throw new Error(body.error || `Board generation failed (HTTP ${response.status}).`);
       if (!body.board?.id) throw new Error('The server did not confirm a created board, so nothing was opened.');
 
-      setMessages((current) => [...current, {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        text: `Created “${body.board.name}” with ${body.tasksCreated} task${body.tasksCreated === 1 ? '' : 's'}. Opening the board now.`
-      }]);
       await onGeneratedBoard?.(body.board, body.tasksCreated);
     } catch (requestError) {
       const message = requestError.message || 'Could not generate a board. Please try again.';
       setAiError(message);
-      setMessages((current) => [...current, {
-        id: `assistant-error-${Date.now()}`,
-        role: 'assistant',
-        tone: 'error',
-        text: message
-      }]);
     } finally {
       setGenerating(false);
     }
   }
 
-  function resetChat() {
-    setMessages([{
-      id: 'welcome',
-      role: 'assistant',
-      text: 'Describe what you are building. I will turn the brief into a prioritised board with tasks you can refine.'
-    }]);
-    setGoal('');
-    setAiError('');
-    aiInputRef.current?.focus();
-  }
-
-  function applySuggestion(text) {
-    setGoal(text);
-    setAiError('');
-    aiInputRef.current?.focus();
-  }
-
-  const sprintBoard = activeBoard?.activeSprint?.name || (activeSprint && String(activeSprint.boardId || '') === String(currentBoardId) ? activeSprint.name : '');
-  const suggestions = currentBoardId
-    ? [`Plan the next sprint for ${activeBoardName}`, `Draft a launch checklist for ${activeBoardName}`]
-    : ['Plan a new product board', 'Draft a launch checklist'];
+  const welcomeName = String(user?.name || '').trim().split(/\s+/)[0];
+  const sprintForBoard = activeSprint && String(activeSprint.boardId || '') === String(currentBoardId)
+    ? activeSprint
+    : null;
+  const activeSprintCount = sprintForBoard ? Number(stats?.activeSprints) || 0 : 0;
+  const sprintProgress = Math.max(0, Math.min(100, Number(sprintForBoard?.progress?.progressPercent) || 0));
+  const sprintDateRange = sprintForBoard && isCalendarDate(sprintForBoard.startDate) && isCalendarDate(sprintForBoard.endDate)
+    ? formatDateRange(sprintForBoard.startDate, sprintForBoard.endDate)
+    : '';
+  const openTaskCount = Number.isFinite(Number(stats?.myOpenTasks))
+    ? Number(stats.myOpenTasks)
+    : previewTasks.filter((task) => task.status !== 'done').length;
+  const inFlightCount = previewTasks.filter((task) => ['progress', 'review'].includes(task.status)).length;
 
   return (
-    <div className="home-page">
-      {/* 1. Hero ---------------------------------------------------------- */}
-      <section className="home-hero" aria-labelledby="home-title">
-        <div className="home-hero-copy">
-          <span className="home-eyebrow">
-            <i aria-hidden="true" />
-            Introducing LeadAI • Autonomous Sprint Management
+    <div className="home-page workspace-dashboard">
+      <section className="dashboard-welcome" aria-labelledby="home-title">
+        <div>
+          <span className="dashboard-eyebrow">Engineering workspace</span>
+          <h1 id="home-title">Welcome back{welcomeName ? `, ${welcomeName}` : ''}</h1>
+          <p>{activeBoard ? <>Working in <strong>{activeBoardName}</strong></> : 'Create a board to start organizing your work.'}</p>
+        </div>
+        <div className="dashboard-actions">
+          <button type="button" className="home-secondary" onClick={onCreateBoard}><Plus size={15} /> New Board</button>
+          <button type="button" className="home-primary" onClick={focusGenerator}><Sparkles size={15} /> Generate with AI</button>
+        </div>
+      </section>
+
+      <section className="dashboard-metrics" aria-label="Workspace health">
+        <button type="button" className="dashboard-metric" onClick={() => navigate('/backlog')}>
+          <span className="dashboard-metric-icon is-indigo"><Activity size={17} /></span>
+          <span className="dashboard-metric-copy">
+            <span>Active sprints</span>
+            <strong>{loading && !summary ? '—' : activeSprintCount}</strong>
+            <small>{sprintForBoard ? `${sprintForBoard.name}${sprintDateRange ? ` · ${sprintDateRange}` : ''}` : 'No active sprint'}</small>
           </span>
-          <h1 id="home-title">The Intelligent Kanban Board Built for Modern Engineering Teams</h1>
-          <p className="home-hero-sub">
-            Your workspace is live. Generate a sprint-ready board from a brief, then track every task from backlog to done.
-          </p>
-          <div className="home-hero-actions">
-            <button type="button" className="home-primary" onClick={focusGenerator}>
-              <Sparkles size={13} aria-hidden="true" /> Generate Board with AI
-            </button>
-            <button type="button" className="home-secondary" onClick={() => navigate('/board')}>
-              <LayoutGrid size={13} aria-hidden="true" /> Open Kanban Board
-            </button>
-          </div>
+          {sprintForBoard && <span className="dashboard-metric-progress">{sprintProgress}%</span>}
+        </button>
+        <button type="button" className="dashboard-metric" onClick={() => navigate('/board')}>
+          <span className="dashboard-metric-icon is-cyan"><CircleDot size={17} /></span>
+          <span className="dashboard-metric-copy">
+            <span>Open tasks</span>
+            <strong>{loading && !summary && !previewTasks.length ? '—' : openTaskCount}</strong>
+            <small>{inFlightCount} in flight on this board</small>
+          </span>
+        </button>
+        <div className="dashboard-metric dashboard-metric-workspace">
+          <span className="dashboard-metric-icon is-violet"><LayoutGrid size={17} /></span>
+          <span className="dashboard-metric-copy">
+            <span>Boards</span>
+            <strong>{allBoards.length}</strong>
+            <small>Recent workspace boards</small>
+          </span>
         </div>
+      </section>
 
-        <div className="home-mockup">
-          <div className="home-mockup-toolbar">
-            <div className="home-toolbar-left">
-              <span className="home-workspace-dots" aria-hidden="true"><i /><i /><i /></span>
-              <span className="home-toolbar-title">
-                {sprintBoard || activeBoardName}
-                {(sprintBoard || activeSprint) && <em> • active cycle</em>}
-              </span>
-            </div>
-            <div className="home-toolbar-right">
-              <span className="home-live-pill"><i aria-hidden="true" />{openPreviewTasks} open</span>
-              {activeBoard ? (
-                <>
-                  <button type="button" className="home-toolbar-btn" onClick={() => navigate('/board')}>
-                    <Filter size={11} aria-hidden="true" /> Board filters
-                  </button>
-                  <button type="button" className="home-toolbar-more" onClick={() => navigate('/board')} aria-label="Open the full kanban board" title="Open the full kanban board">
-                    <MoreHorizontal size={14} aria-hidden="true" />
-                  </button>
-                </>
-              ) : (
-                <button type="button" className="home-toolbar-btn" onClick={onCreateBoard}>
-                  <Plus size={11} aria-hidden="true" /> New board
-                </button>
-              )}
-            </div>
-          </div>
-
-          {activeBoard ? (
-            <div className="home-mockup-grid">
-              {stages.map((stage) => (
-                <div className="home-preview-column" key={stage.id}>
-                  <div className="home-column-head">
-                    <span className="home-column-title">{stage.title}</span>
-                    <span className="home-column-hint" title={stage.hint}>
-                      <MoreHorizontal size={12} aria-hidden="true" />
-                      {stage.total} {stage.total === 1 ? 'task' : 'tasks'}
-                    </span>
-                    <button type="button" className="home-column-more" onClick={() => navigate('/board')} aria-label={`Open the full board from ${stage.hint}`} title="Open full board">
-                      <MoreHorizontal size={14} aria-hidden="true" />
-                    </button>
-                  </div>
-                  <div className="home-column-body">
-                    {stage.tasks.slice(0, stage.limit).map((task) => (
-                      <PreviewTaskCard key={`${task.boardId}-${task.key}`} task={task} onOpenTask={onOpenTask} />
-                    ))}
-                    {!stage.tasks.length && (
-                      <div className="home-empty-column">
-                        <CircleDot size={14} aria-hidden="true" />
-                        <span>No tasks in this stage</span>
-                      </div>
-                    )}
-                    {stage.insight && <SprintInsight activeSprint={activeSprint} navigate={navigate} />}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="home-mockup-empty">
-              <span className="home-mockup-empty-icon"><LayoutGrid size={24} aria-hidden="true" /></span>
-              <strong>No board selected yet</strong>
-              <p>Create a board to see real tasks here, or let AI draft the first plan for you.</p>
-              <div>
-                <button type="button" className="home-primary" onClick={onCreateBoard}><Plus size={13} aria-hidden="true" /> Create a board</button>
-                <button type="button" className="home-secondary" onClick={focusGenerator}><Sparkles size={13} aria-hidden="true" /> Generate with AI</button>
-              </div>
+      <section className="dashboard-switcher" aria-labelledby="board-switcher-title">
+        <div className="dashboard-section-heading">
+          <div><span className="dashboard-eyebrow">Workspace</span><h2 id="board-switcher-title">Recent boards</h2></div>
+          <button type="button" className="dashboard-text-action" onClick={() => navigate('/team')}>Manage boards <ArrowRight size={14} /></button>
+        </div>
+        <div className="dashboard-board-list">
+          {allBoards.length ? allBoards.slice(0, 8).map((board) => (
+            <button
+              type="button"
+              className={`dashboard-board-chip ${String(board.id) === String(currentBoardId) ? 'is-active' : ''}`}
+              key={board.id}
+              onClick={() => onSelectBoard?.(board.id)}
+              aria-pressed={String(board.id) === String(currentBoardId)}
+              title={`Switch to ${board.name}`}
+            >
+              <LayoutGrid size={15} />
+              <span>{board.name}</span>
+              {board.openTasks != null && <small>{board.openTasks} open</small>}
+            </button>
+          )) : (
+            <div className="dashboard-inline-empty">
+              <span>No boards yet</span>
+              <button type="button" className="dashboard-text-action" onClick={onCreateBoard}>Create your first board <ArrowRight size={14} /></button>
             </div>
           )}
         </div>
       </section>
 
-      {/* 2. Feature highlights ------------------------------------------- */}
-      <section className="home-section home-features" aria-labelledby="home-features-title">
-        <SectionHead
-          id="home-features-title"
-          kicker="Purpose-Built Infrastructure"
-          title="Engineered for High-Velocity Product Teams"
-          copy="No bloated configuration wizards. Zero lag. High-density tactical instrumentation built to stay out of your team’s way."
-        />
-        <div className="home-feature-grid">
-          {features.map((feature) => {
-            const Icon = feature.icon;
-            return (
-              <article className="home-feature" key={feature.id}>
-                <span className={`home-feature-icon is-${feature.tone}`}><Icon size={19} aria-hidden="true" /></span>
-                <h3>{feature.title}</h3>
-                <p>{feature.body}</p>
-                <span className="home-feature-foot">{feature.footIcon}<span>{feature.foot}</span></span>
-              </article>
-            );
-          })}
+      <section className="dashboard-board-spotlight" aria-labelledby="board-spotlight-title">
+        <div className="dashboard-section-heading">
+          <div>
+            <span className="dashboard-eyebrow">Active board</span>
+            <h2 id="board-spotlight-title">{activeBoardName}</h2>
+          </div>
+          <button type="button" className="dashboard-text-action" onClick={() => onOpenBoard?.(activeBoard?.id)} disabled={!activeBoard?.id}>
+            Open full board <ArrowUpRight size={15} />
+          </button>
         </div>
-      </section>
-
-      {/* 3. Interactive AI assistant ------------------------------------- */}
-      <section className="home-section home-ai" id="home-ai" aria-labelledby="home-ai-title">
-        <SectionHead
-          id="home-ai-title"
-          kicker="Live AI Planning"
-          title="Ask Copilot. Watch Your Board Take Shape."
-          copy="Describe the project in plain language. LeadAI drafts a prioritised board you can refine, review, and ship."
-        />
-        <div className="home-ai-panel">
-          <div className="home-ai-chat">
-            <header className="home-ai-chat-head">
-              <span className="home-ai-avatar-tile"><Bot size={17} aria-hidden="true" /></span>
-              <div>
-                <strong>LeadAI Copilot</strong>
-                <span className={aiConfigured === false ? 'is-offline' : ''}><i aria-hidden="true" />{aiConfigured === false ? 'AI planning offline' : 'Ready for sprint commands'}</span>
-              </div>
-              <button
-                type="button"
-                className="home-ai-expand"
-                onClick={() => onOpenBoard?.(activeBoard?.id)}
-                disabled={!activeBoard?.id}
-                aria-label="Open the board and its Copilot"
-                title="Open the board and its Copilot"
-              >
-                <ArrowUpRight size={15} aria-hidden="true" />
-              </button>
-            </header>
-
-            <div className="home-ai-thread" ref={threadRef} role="log" aria-live="polite" aria-label="AI planning conversation">
-              {aiConfigured === false && (
-                <div className="home-ai-notice" role="status">
-                  <AlertTriangle size={15} aria-hidden="true" />
-                  <div>
-                    <strong>AI planning is not configured on this server.</strong>
-                    <p>The API is missing a provider key, so generation cannot run. Create a board manually and keep working.</p>
-                    <button type="button" onClick={onCreateBoard}><Plus size={12} aria-hidden="true" /> Create board manually</button>
-                  </div>
+        {activeBoard ? (
+          <div className="dashboard-kanban-preview">
+            {stages.map((stage) => (
+              <div className="dashboard-preview-column" key={stage.id}>
+                <div className="dashboard-preview-heading">
+                  <span><i className={`is-${stage.id}`} />{stage.title}</span>
+                  <strong>{stage.tasks.length}</strong>
                 </div>
-              )}
-
-              {messages.map((message) => (
-                <div className={`home-ai-message is-${message.role}`} key={message.id}>
-                  {message.role === 'assistant' && <span className="home-ai-msg-avatar">AI</span>}
-                  <div className={`home-ai-bubble ${message.tone === 'error' ? 'is-error' : ''}`}>
-                    <p>{message.text}</p>
-                  </div>
-                  {message.role === 'user' && <span className="home-ai-msg-user">{initialsOf(user?.name)}</span>}
-                </div>
-              ))}
-
-              {generating && (
-                <div className="home-ai-message is-assistant">
-                  <span className="home-ai-msg-avatar">AI</span>
-                  <div className="home-ai-bubble is-typing">
-                    <Loader2 size={13} className="home-spin" aria-hidden="true" />
-                    <span>Drafting a board from your brief…</span>
-                  </div>
-                </div>
-              )}
-
-              {!generating && messages.length <= 1 && (
-                <div className="home-ai-suggestions">
-                  {suggestions.map((suggestion) => (
-                    <button type="button" key={suggestion} onClick={() => applySuggestion(suggestion)}>{suggestion}</button>
+                <div className="dashboard-preview-tasks">
+                  {stage.tasks.slice(0, 3).map((task) => (
+                    <PreviewTaskCard key={`${task.boardId}-${task.key}`} task={task} onOpenTask={onOpenTask} />
                   ))}
+                  {!stage.tasks.length && <div className="dashboard-column-empty">No tasks in this stage</div>}
                 </div>
-              )}
-            </div>
-
-            {aiError && <p className="home-ai-error" role="alert">{aiError}</p>}
-
-            <form className="home-ai-form" onSubmit={generateBoard}>
-              <input
-                ref={aiInputRef}
-                value={goal}
-                onChange={(event) => { setGoal(event.target.value); if (aiError) setAiError(''); }}
-                maxLength={2000}
-                placeholder="Describe a project or sprint goal…"
-                aria-label="Describe a project for the AI planner"
-                disabled={generating}
-                required
-              />
-              <button type="submit" className="home-ai-send" disabled={generating} aria-label="Generate a board from this brief">
-                {generating ? <Loader2 size={13} className="home-spin" aria-hidden="true" /> : <><span>Send</span><Send size={10} aria-hidden="true" /></>}
-              </button>
-            </form>
-          </div>
-
-          <div className="home-ai-board">
-            <header className="home-ai-board-head">
-              <span className="home-ai-board-title">
-                <Activity size={15} aria-hidden="true" />
-                Live board · {activeBoardName}
-              </span>
-              <span className={`home-ai-sync ${previewTasks.length ? 'is-active' : 'is-empty'}`}>
-                {previewTasks.length ? 'Sync Active' : activeBoard ? 'No tasks' : 'No board'}
-              </span>
-            </header>
-
-            <div className="home-ai-board-list">
-              {previewTasks.slice(0, 3).map((task) => {
-                const badge = badgeForTask(task);
-                const icon = task.status === 'done'
-                  ? <CheckCircle2 size={15} aria-hidden="true" />
-                  : task.status === 'progress' || task.status === 'review'
-                    ? <Activity size={15} aria-hidden="true" />
-                    : <CircleDot size={15} aria-hidden="true" />;
-                return (
-                  <button
-                    type="button"
-                    key={`${task.boardId}-${task.key}`}
-                    className="home-ai-task"
-                    onClick={() => onOpenTask?.(task)}
-                    aria-label={`Open task ${task.key}: ${task.title}`}
-                  >
-                    <span className={`home-ai-task-icon is-${badge.tone}`}>{icon}</span>
-                    <span className="home-ai-task-copy">
-                      <strong>{task.key}: {task.title}</strong>
-                      <span>
-                        {task.assignee && task.assignee !== 'Unassigned' ? `Assignee: ${task.assignee}` : 'Unassigned'}
-                        {task.labels?.[0] ? ` • ${task.labels[0]}` : ` • ${statusLabels[task.status] || task.status}`}
-                      </span>
-                    </span>
-                    <span className={`home-ai-task-badge is-${badge.tone}`}>{badge.label}</span>
-                  </button>
-                );
-              })}
-
-              {!previewTasks.length && (
-                <div className="home-ai-board-empty">
-                  <CircleDot size={16} aria-hidden="true" />
-                  <strong>{activeBoard ? 'This board has no tasks yet' : 'No board selected'}</strong>
-                  <p>{activeBoard ? 'Add work on the board or generate a plan with the Copilot on the left.' : 'Create a board to see live tasks here.'}</p>
-                  <button type="button" onClick={activeBoard ? () => navigate('/board') : onCreateBoard}>
-                    {activeBoard ? 'Open board' : 'Create board'} <ArrowRight size={12} aria-hidden="true" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <footer className="home-ai-board-foot">
-              <span><Zap size={12} aria-hidden="true" /> Live from your active board</span>
-              <div>
-                <button type="button" onClick={() => onOpenBoard?.(activeBoard?.id)} disabled={!activeBoard?.id}>Open board</button>
-                <button type="button" onClick={resetChat}>Reset chat</button>
               </div>
-            </footer>
-          </div>
-        </div>
-      </section>
-
-      {/* 4. Social proof & real metrics ---------------------------------- */}
-      <section className="home-section home-proof" aria-labelledby="home-proof-title">
-        <div className="home-proof-panel">
-          <div className="home-proof-head">
-            <div className="home-proof-copy">
-              <span className="home-kicker">Workspace Signals</span>
-              <h2 id="home-proof-title">Your workspace, measured in real work</h2>
-            </div>
-            <div className="home-proof-brands" aria-label="Your boards">
-              {proofBoards.map((board) => (
-                <button
-                  type="button"
-                  key={board.id}
-                  className="home-proof-brand"
-                  onClick={() => onOpenBoard?.(board.id)}
-                  title={`Open ${board.name}`}
-                >
-                  <LayoutGrid size={18} aria-hidden="true" />
-                  <span>{board.name}</span>
-                </button>
-              ))}
-              {!proofBoards.length && (
-                <button type="button" className="home-proof-brand is-empty" onClick={onCreateBoard}>
-                  <Plus size={18} aria-hidden="true" />
-                  <span>No boards yet</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {error && (
-            <div className="home-proof-alert" role="alert">
-              <AlertTriangle size={15} aria-hidden="true" />
-              <span>{error}</span>
-              <button type="button" onClick={() => setReloadKey((value) => value + 1)}>Retry</button>
-            </div>
-          )}
-
-          <div className="home-proof-stats" aria-busy={loading}>
-            {proofMetrics.map((metric) => (
-              <button
-                type="button"
-                className={`home-proof-stat is-${metric.tone}`}
-                key={metric.id}
-                onClick={metric.onClick}
-                aria-label={`${metric.label}: ${metric.value}. ${metric.description}`}
-              >
-                <strong className="home-proof-value">{metric.value}</strong>
-                <span className="home-proof-label">{metric.label}</span>
-                <p className="home-proof-desc">{metric.description}</p>
-              </button>
             ))}
           </div>
-        </div>
+        ) : (
+          <div className="dashboard-empty">
+            <LayoutGrid size={21} />
+            <strong>Your workspace is ready for its first board</strong>
+            <p>Create a board manually or ask Copilot to turn a project brief into a plan.</p>
+            <button type="button" className="home-primary" onClick={onCreateBoard}><Plus size={14} /> Create a board</button>
+          </div>
+        )}
       </section>
 
-      {/* 5. CTA banner ---------------------------------------------------- */}
-      <section className="home-section home-cta" aria-labelledby="home-cta-title">
-        <div className="home-cta-banner">
-          <div className="home-cta-content">
-            <span className="home-cta-badge"><Sparkles size={12} aria-hidden="true" /> AI-assisted planning • Real workspace data</span>
-            <h2 id="home-cta-title">Ready to supercharge your agile workflow?</h2>
-            <p>Generate a sprint-ready board from a brief, or create one manually and shape it with your team.</p>
-            <div className="home-cta-actions">
-              <button type="button" className="home-primary" onClick={focusGenerator}>
-                <Sparkles size={13} aria-hidden="true" /> Generate Board with AI
-              </button>
-              <button type="button" className="home-secondary" onClick={onCreateBoard}>
-                <Plus size={13} aria-hidden="true" /> Create a board
-              </button>
-            </div>
+      <section className="dashboard-copilot" aria-labelledby="home-ai-title">
+        <div className="dashboard-copilot-heading">
+          <span className="dashboard-copilot-icon"><Bot size={18} /></span>
+          <div>
+            <span className="dashboard-eyebrow">AI Copilot</span>
+            <h2 id="home-ai-title">Ask Copilot. Watch Your Board Take Shape.</h2>
+            <p>Describe the project or sprint you want to plan. Copilot creates a board and opens it when ready.</p>
           </div>
+          {aiConfigured === false && <span className="dashboard-ai-status">AI unavailable</span>}
         </div>
+        <form className="dashboard-prompt" onSubmit={generateBoard}>
+          <Sparkles size={17} aria-hidden="true" />
+          <input
+            ref={aiInputRef}
+            value={goal}
+            onChange={(event) => { setGoal(event.target.value); if (aiError) setAiError(''); }}
+            maxLength={2000}
+            placeholder="e.g. Build an e-commerce checkout sprint"
+            aria-label="Describe a project for the AI planner"
+            disabled={generating || aiConfigured === false}
+            required
+          />
+          <button type="submit" className="home-primary" disabled={generating || aiConfigured === false}>
+            {generating ? <Loader2 size={15} className="home-spin" /> : <><span>Generate board</span><Send size={13} /></>}
+          </button>
+        </form>
+        {aiError && <p className="dashboard-ai-error" role="alert">{aiError}</p>}
+        {aiConfigured === false && <p className="dashboard-ai-note">AI generation is not configured on this server. You can still create a board manually.</p>}
       </section>
     </div>
   );
+
 }

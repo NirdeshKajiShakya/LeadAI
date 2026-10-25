@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Plus,
   RotateCcw, Search, Sparkles, Target, Trash2, X
@@ -6,6 +6,9 @@ import {
 import { SPRINT_DURATION_DAYS, formatDateRange, endDateForStart, isCalendarDate } from './sprintDates.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const storyPointOptions = [0, 1, 2, 3, 5, 8, 13];
+const validStoryPointSet = new Set(storyPointOptions);
+const safeStoryPoints = (value) => Number.isInteger(Number(value)) && Number(value) >= 0 && Number(value) <= 100 ? Number(value) : 0;
 const priorityLabels = { urgent: 'P0 Urgent', high: 'P1 High', medium: 'P2 Medium', low: 'P3 Low' };
 const priorityClass = { urgent: 'priority-urgent', high: 'priority-high', medium: 'priority-medium', low: 'priority-low' };
 
@@ -23,7 +26,7 @@ const initials = (name = '') => name.split(' ').filter(Boolean).map((part) => pa
 // prefer it when the page opens instead of defaulting to the oldest sprint.
 function pickSprintId(list, current) {
   if (current && list.some((sprint) => sprint.id === current)) return current;
-  return list.find((sprint) => sprint.current?.state === 'active')?.id ?? list[0]?.id ?? null;
+  return list.find((sprint) => sprint.current?.state === 'active')?.id ?? null;
 }
 
 async function request(path, token, options = {}) {
@@ -40,7 +43,7 @@ async function request(path, token, options = {}) {
   return body;
 }
 
-export default function SprintBacklog({ token }) {
+export default function SprintBacklog({ token, activeBoardId = '', activeBoardName = '' }) {
   const [sprints, setSprints] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [sprintTasks, setSprintTasks] = useState([]);
@@ -51,44 +54,78 @@ export default function SprintBacklog({ token }) {
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState('');
   const [priority, setPriority] = useState('all');
+  const [aiPlannerOpen, setAiPlannerOpen] = useState(false);
+  const [aiGoal, setAiGoal] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const activeBoardIdRef = useRef(activeBoardId);
+  activeBoardIdRef.current = activeBoardId;
 
-  const selected = useMemo(() => sprints.find((sprint) => sprint.id === selectedId) ?? null, [sprints, selectedId]);
+  const selected = useMemo(() => sprints.find((sprint) =>
+    sprint.id === selectedId && String(sprint.boardId || '') === String(activeBoardId)
+  ) ?? null, [activeBoardId, sprints, selectedId]);
+  const boardScope = activeBoardId ? `?boardId=${encodeURIComponent(activeBoardId)}` : '';
 
-  const loadSprints = useCallback(async () => {
-    const list = await request('/api/sprints', token);
+  const loadSprints = useCallback(async (preferredId = null) => {
+    if (!activeBoardId) {
+      setSprints([]);
+      setSelectedId(null);
+      return null;
+    }
+    const response = await request(`/api/sprints?boardId=${encodeURIComponent(activeBoardId)}`, token);
+    if (String(activeBoardIdRef.current) !== String(activeBoardId)) return null;
+    const list = response.filter((sprint) => String(sprint.boardId || '') === String(activeBoardId));
     setSprints(list);
-    setSelectedId((current) => pickSprintId(list, current));
-  }, [token]);
+    const nextId = pickSprintId(list, preferredId);
+    setSelectedId(nextId);
+    return nextId;
+  }, [activeBoardId, token]);
 
   // Sprint and product backlogs are fetched separately by the API, so a task can never
   // appear in both lists; this refetches both after every mutation.
   const refreshTasks = useCallback(async (sprintId) => {
-    const [inSprint, backlog] = await Promise.all([
-      sprintId ? request(`/api/sprints/${sprintId}/tasks`, token) : Promise.resolve([]),
-      request('/api/backlog', token)
+    if (String(activeBoardIdRef.current) !== String(activeBoardId)) return;
+    if (!activeBoardId) {
+      setSprintTasks([]);
+      setBacklogTasks([]);
+      return;
+    }
+    const [responseSprintTasks, responseBacklog] = await Promise.all([
+      sprintId ? request(`/api/sprints/${sprintId}/tasks${boardScope}`, token) : Promise.resolve([]),
+      request(`/api/backlog${boardScope}`, token)
     ]);
-    setSprintTasks(inSprint);
-    setBacklogTasks(backlog);
-  }, [token]);
+    if (String(activeBoardIdRef.current) !== String(activeBoardId)) return;
+    setSprintTasks(responseSprintTasks.filter((task) => String(task.boardId || '') === String(activeBoardId)));
+    setBacklogTasks(responseBacklog.filter((task) => String(task.boardId || '') === String(activeBoardId)));
+  }, [activeBoardId, boardScope, token]);
 
   useEffect(() => {
     let active = true;
     (async () => {
       setLoading(true);
       setError('');
+      setSprints([]);
+      setSelectedId(null);
+      setSprintTasks([]);
+      setBacklogTasks([]);
+      if (!activeBoardId) {
+        setLoading(false);
+        return;
+      }
       try {
-        const list = await request('/api/sprints', token);
+        const responseSprints = await request(`/api/sprints${boardScope}`, token);
+        const list = responseSprints.filter((sprint) => String(sprint.boardId || '') === String(activeBoardId));
         if (!active) return;
         setSprints(list);
         const nextId = pickSprintId(list, null);
         setSelectedId(nextId);
-        const [inSprint, backlog] = await Promise.all([
-          nextId ? request(`/api/sprints/${nextId}/tasks`, token) : Promise.resolve([]),
-          request('/api/backlog', token)
+        const [responseSprintTasks, responseBacklog] = await Promise.all([
+          nextId ? request(`/api/sprints/${nextId}/tasks${boardScope}`, token) : Promise.resolve([]),
+          request(`/api/backlog${boardScope}`, token)
         ]);
         if (!active) return;
-        setSprintTasks(inSprint);
-        setBacklogTasks(backlog);
+        setSprintTasks(responseSprintTasks.filter((task) => String(task.boardId || '') === String(activeBoardId)));
+        setBacklogTasks(responseBacklog.filter((task) => String(task.boardId || '') === String(activeBoardId)));
       } catch (loadError) {
         if (active) setError(loadError.message);
       } finally {
@@ -96,7 +133,7 @@ export default function SprintBacklog({ token }) {
       }
     })();
     return () => { active = false; };
-  }, [token]);
+  }, [activeBoardId, boardScope, token]);
 
   async function switchSprint(sprintId) {
     setSelectedId(sprintId);
@@ -129,28 +166,59 @@ export default function SprintBacklog({ token }) {
     }
   }
 
-  const moveToSprint = (key) => runMutation(key, () => request(`/api/sprints/${selectedId}/tasks`, token, { method: 'POST', body: JSON.stringify({ key }) }));
-  const removeFromSprint = (key) => runMutation(key, () => request(`/api/sprints/${selectedId}/tasks/${key}`, token, { method: 'DELETE' }));
+  const moveToSprint = (key) => runMutation(key, () => request(`/api/sprints/${selectedId}/tasks${boardScope}`, token, { method: 'POST', body: JSON.stringify({ key }) }));
+  const removeFromSprint = (key) => runMutation(key, () => request(`/api/sprints/${selectedId}/tasks/${key}${boardScope}`, token, { method: 'DELETE' }));
+
+  async function generateSprint(event) {
+    event.preventDefault();
+    if (aiBusy) return;
+    setAiBusy(true);
+    setAiError('');
+    setError('');
+    try {
+      const result = await request('/api/ai/sprints', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          goal: aiGoal.trim(),
+          boardId: activeBoardId
+        })
+      });
+      if (!result?.sprint?.id) throw new Error('The AI planner did not return a created sprint.');
+      setAiPlannerOpen(false);
+      setAiGoal('');
+      const nextId = await loadSprints(result.sprint.id);
+      await refreshTasks(nextId);
+    } catch (generationError) {
+      setAiError(generationError.message || 'Could not generate the sprint. Please try again.');
+    } finally {
+      setAiBusy(false);
+    }
+  }
 
   const matches = (task) => {
     const haystack = `${task.key} ${task.title} ${task.description} ${task.assignee}`.toLowerCase();
     return haystack.includes(query.toLowerCase()) && (priority === 'all' || task.priority === priority);
   };
 
-  const visibleSprintTasks = sprintTasks.filter(matches);
-  const visibleBacklog = backlogTasks.filter(matches);
+  const visibleSprintTasks = sprintTasks.filter((task) =>
+    String(task.boardId || '') === String(activeBoardId) && matches(task)
+  );
+  const visibleBacklog = backlogTasks.filter((task) =>
+    String(task.boardId || '') === String(activeBoardId) && matches(task)
+  );
   const selectedIsActive = selected?.current?.state === 'active';
   const totals = selected?.progress ?? { totalStoryPoints: 0, completedStoryPoints: 0, remainingStoryPoints: 0, progressPercent: 0 };
 
   return <section className="sb-page">
     <div className="sb-context-strip">
-      <div className="sb-crumbs"><span>Project</span><ChevronDown size={13} /><strong>Sprint Backlog</strong></div>
+      <div className="sb-crumbs"><span>{activeBoardName || 'Selected board'}</span><ChevronDown size={13} /><strong>Sprint Backlog</strong></div>
       <div className="sb-selector">
         <label className="sb-select"><Target size={14} /><select value={selectedId ?? ''} onChange={(event) => switchSprint(event.target.value)} disabled={sprints.length === 0}>
-          {sprints.length === 0 && <option value="">No sprints yet</option>}
+          {!selectedId && <option value="">{sprints.length ? 'No active sprint' : 'No sprints yet'}</option>}
           {sprints.map((sprint) => <option key={sprint.id} value={sprint.id}>{sprint.name}</option>)}
         </select><ChevronDown size={13} /></label>
-        <button className="secondary-button" onClick={() => setEditing({ mode: 'create' })}><Plus size={15} /> New Sprint</button>
+        <button className="secondary-button" disabled={!activeBoardId} onClick={() => setEditing({ mode: 'create' })}><Plus size={15} /> Create Sprint</button>
+        <button className="secondary-button" disabled={!activeBoardId} onClick={() => setAiPlannerOpen((open) => !open)}><Sparkles size={15} /> Generate with AI</button>
         <button className="secondary-button" disabled={!selected} onClick={() => setEditing({ mode: 'edit', sprint: selected })}><CalendarDays size={15} /> Edit Sprint</button>
       </div>
     </div>
@@ -159,11 +227,24 @@ export default function SprintBacklog({ token }) {
 
     {loading && <div className="sb-loading">Loading sprint backlog...</div>}
 
-    {!loading && sprints.length === 0 && <div className="sb-empty">
-      <Target size={22} />
-      <h2>No sprints yet</h2>
-      <p>Create your first {SPRINT_DURATION_DAYS}-day sprint to start planning work out of the product backlog.</p>
-      <button className="primary-button" onClick={() => setEditing({ mode: 'create' })}><Plus size={16} /> New Sprint</button>
+    {aiPlannerOpen && !loading && <form className="sb-ai-planner" onSubmit={generateSprint}>
+      <div className="sb-ai-planner-copy"><Sparkles size={18} /><div><strong>Plan a sprint with Copilot</strong><span>Describe the focus and Copilot will create a sprint with prioritized, skill-assigned tasks.</span></div></div>
+      <div className="sb-ai-planner-controls">
+        <input value={aiGoal} onChange={(event) => { setAiGoal(event.target.value); setAiError(''); }} maxLength={2000} required minLength={10} placeholder="e.g. Plan a 2-week sprint focusing on backend refactoring" aria-label="Sprint planning brief" disabled={aiBusy} />
+        <button className="primary-button" type="submit" disabled={aiBusy || aiGoal.trim().length < 10}>{aiBusy ? <><RotateCcw size={14} /> Generating...</> : <><Sparkles size={14} /> Generate Sprint</>}</button>
+      </div>
+      {aiError && <p className="sb-ai-error" role="alert">{aiError}</p>}
+    </form>}
+
+    {!loading && !selected && <div className="sb-empty">
+      <span className="sb-empty-icon"><Target size={22} /></span>
+      <div className="eyebrow">Sprint planning</div>
+      <h2>No Active Sprint Found</h2>
+      <p>Plan your first sprint from the product backlog or let LeadAI Copilot draft a prioritized sprint for your team.</p>
+      <div className="sb-empty-actions">
+        <button className="primary-button" disabled={!activeBoardId} onClick={() => setEditing({ mode: 'create' })}><Plus size={16} /> Create Sprint</button>
+        <button className="secondary-button" disabled={!activeBoardId} onClick={() => setAiPlannerOpen(true)}><Sparkles size={15} /> Generate Sprint with AI</button>
+      </div>
     </div>}
 
     {!loading && selected && <>
@@ -203,7 +284,7 @@ export default function SprintBacklog({ token }) {
 
       {sprintGroups.map((group) => {
         const groupTasks = visibleSprintTasks.filter((task) => task.status === group.id);
-        const groupPoints = groupTasks.reduce((sum, task) => sum + (Number(task.storyPoints) || 0), 0);
+        const groupPoints = groupTasks.reduce((sum, task) => sum + safeStoryPoints(task.storyPoints), 0);
         return <section key={group.id} className="sb-group">
           <header className="sb-group-head">
             <div><span className={`sb-dot sb-dot-${group.id}`}></span><strong>{group.label}</strong><em>{group.hint}</em></div>
@@ -211,43 +292,74 @@ export default function SprintBacklog({ token }) {
           </header>
           {groupTasks.length === 0
             ? <div className="sb-empty-row">No issues in {group.label.toLowerCase()}</div>
-            : <div className="sb-list">{groupTasks.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="remove" onAction={removeFromSprint} disabled={task.status !== 'todo'} disabledReason="Only To Do tasks can return to the Product Backlog." />)}</div>}
+            : <div className="sb-list">{groupTasks.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="remove" onAction={removeFromSprint} onStoryPointsChange={(key, points) => runMutation(key, () => request(`/api/tasks/${key}?boardId=${encodeURIComponent(activeBoardId)}`, token, { method: 'PATCH', body: JSON.stringify({ storyPoints: points }) }))} disabled={task.status !== 'todo'} disabledReason="Only To Do tasks can return to the Product Backlog." />)}</div>}
         </section>;
       })}
 
-      <section className="sb-group sb-backlog">
-        <header className="sb-group-head">
-          <div><ChevronDown size={15} /><strong>Product Backlog</strong><em>Unscheduled work · priority first, then oldest</em></div>
-          <span className="sb-group-count">{backlogTasks.length} issues · {backlogTasks.reduce((sum, task) => sum + (Number(task.storyPoints) || 0), 0)} SP</span>
-        </header>
-        {!selectedIsActive && <div className="sb-backlog-note" role="status">
-          <AlertTriangle size={14} />
-          <span>{selected ? `"${selected.name}" is ${selected.current?.state === 'upcoming' ? 'upcoming' : 'completed'}. ` : ''}Only an active sprint can accept backlog items.</span>
-          <button className="secondary-button" onClick={() => setEditing({ mode: 'create' })}><Plus size={14} /> New Sprint</button>
-        </div>}
-        {backlogTasks.length === 0
-          ? <div className="sb-empty-row">Every task is committed to a sprint.</div>
-          : <div className="sb-list">{visibleBacklog.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="add" onAction={moveToSprint} disabled={!selectedIsActive} disabledReason="Select or create an active sprint first." />)}</div>}
-      </section>
+      <ProductBacklogSection
+        backlogTasks={backlogTasks}
+        visibleBacklog={visibleBacklog}
+        selected={selected}
+        selectedIsActive={selectedIsActive}
+        pendingKey={pendingKey}
+        onCreateSprint={() => setEditing({ mode: 'create' })}
+        onMove={moveToSprint}
+        onStoryPointsChange={(key, points) => runMutation(key, () => request(`/api/tasks/${key}?boardId=${encodeURIComponent(activeBoardId)}`, token, { method: 'PATCH', body: JSON.stringify({ storyPoints: points }) }))}
+      />
     </>}
+
+    {!loading && !selected && <ProductBacklogSection
+      backlogTasks={backlogTasks}
+      visibleBacklog={visibleBacklog}
+      selected={null}
+      selectedIsActive={false}
+      pendingKey={pendingKey}
+      onCreateSprint={() => setEditing({ mode: 'create' })}
+      onMove={moveToSprint}
+      onStoryPointsChange={(key, points) => runMutation(key, () => request(`/api/tasks/${key}?boardId=${encodeURIComponent(activeBoardId)}`, token, { method: 'PATCH', body: JSON.stringify({ storyPoints: points }) }))}
+    />}
 
     {editing && <SprintModal
       mode={editing.mode}
       sprint={editing.sprint}
       token={token}
+      boardId={activeBoardId}
+      backlogTasks={backlogTasks}
       onClose={() => setEditing(null)}
-      onSaved={async () => {
+      onSaved={async (savedSprint) => {
         setEditing(null);
-        await loadSprints();
-        await refreshTasks(selectedId);
+        const nextId = await loadSprints(savedSprint?.id || selectedId);
+        await refreshTasks(nextId);
       }}
     />}
   </section>;
 }
 
-function SprintTaskRow({ task, busy, action, onAction, disabled = false, disabledReason = '' }) {
+function ProductBacklogSection({ backlogTasks, visibleBacklog, selected, selectedIsActive, pendingKey, onCreateSprint, onMove, onStoryPointsChange }) {
+  const backlogPoints = backlogTasks.reduce((sum, task) => sum + safeStoryPoints(task.storyPoints), 0);
+  return <section className="sb-group sb-backlog">
+    <header className="sb-group-head">
+      <div><ChevronDown size={15} /><strong>Product Backlog</strong><em>Unscheduled work · priority first, then oldest</em></div>
+      <span className="sb-group-count">{backlogTasks.length} issues · {backlogPoints} SP</span>
+    </header>
+    {!selectedIsActive && <div className="sb-backlog-note" role="status">
+      <AlertTriangle size={14} />
+      <span>{selected ? `"${selected.name}" is ${selected.current?.state === 'upcoming' ? 'upcoming' : 'completed'}. ` : ''}Select or create an active sprint before moving backlog items.</span>
+      <button className="secondary-button" onClick={onCreateSprint}><Plus size={14} /> Create Sprint</button>
+    </div>}
+    {backlogTasks.length === 0
+      ? <div className="sb-empty-row">No unscheduled tasks in the Product Backlog.</div>
+      : visibleBacklog.length === 0
+        ? <div className="sb-empty-row">No backlog tasks match these filters.</div>
+        : <div className="sb-list">{visibleBacklog.map((task) => <SprintTaskRow key={task.key} task={task} busy={pendingKey === task.key} action="add" onAction={onMove} onStoryPointsChange={onStoryPointsChange} disabled={!selectedIsActive} disabledReason="Select or create an active sprint first." />)}</div>}
+  </section>;
+}
+
+function SprintTaskRow({ task, busy, action, onAction, onStoryPointsChange, disabled = false, disabledReason = '' }) {
   const labels = Array.isArray(task.labels) ? task.labels : [];
   const priority = priorityLabels[task.priority] ? task.priority : 'medium';
+  const points = safeStoryPoints(task.storyPoints);
+  const pointOptions = validStoryPointSet.has(points) ? storyPointOptions : [...storyPointOptions, points].sort((a, b) => a - b);
   return <article className={`sb-row ${busy ? 'is-busy' : ''}`}>
     <span className="sb-row-key">#{task.key}</span>
     <div className="sb-row-main">
@@ -255,7 +367,9 @@ function SprintTaskRow({ task, busy, action, onAction, disabled = false, disable
       <div className="sb-row-tags">
         {labels.map((label) => <span key={label} className="sb-tag">{label}</span>)}
         <span className={`priority ${priorityClass[priority]}`}>{priorityLabels[priority]}</span>
-        <span className="sb-points">{task.storyPoints || 0} SP</span>
+        <select className="sb-points sb-points-select" aria-label={`Story points for ${task.key}`} value={points} disabled={busy} onChange={(event) => onStoryPointsChange(task.key, Number(event.target.value))}>
+          {pointOptions.map((option) => <option key={option} value={option}>{option} SP{!validStoryPointSet.has(option) ? ' · Existing estimate' : ''}</option>)}
+        </select>
       </div>
     </div>
     <span className="sb-row-assignee"><i>{initials(task.assignee)}</i>{task.assignee}</span>
@@ -265,27 +379,39 @@ function SprintTaskRow({ task, busy, action, onAction, disabled = false, disable
   </article>;
 }
 
-function SprintModal({ mode, sprint, token, onClose, onSaved }) {
-  const initialStart = sprint?.startDate ?? '';
+function SprintModal({ mode, sprint, token, boardId, backlogTasks = [], onClose, onSaved }) {
+  const today = new Date();
+  const initialStart = sprint?.startDate ?? `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const initialEnd = sprint?.endDate ?? endDateForStart(initialStart);
   const [name, setName] = useState(sprint?.name ?? '');
   const [goal, setGoal] = useState(sprint?.goal ?? '');
   const [startDate, setStartDate] = useState(initialStart);
+  const [endDate, setEndDate] = useState(initialEnd);
+  const [selectedTaskKeys, setSelectedTaskKeys] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  const endDate = startDate && isCalendarDate(startDate) ? endDateForStart(startDate) : '';
   const range = formatDateRange(startDate, endDate);
+  const selectableTasks = backlogTasks.filter((task) => !boardId || String(task.boardId || '') === String(boardId));
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const sprintStartsToday = todayIso === startDate;
 
   async function submit(event) {
     event.preventDefault();
     setSaving(true);
     setError('');
     try {
-      await request(mode === 'create' ? '/api/sprints' : `/api/sprints/${sprint.id}`, token, {
+      const savedSprint = await request(mode === 'create' ? '/api/sprints' : `/api/sprints/${sprint.id}?boardId=${encodeURIComponent(boardId)}`, token, {
         method: mode === 'create' ? 'POST' : 'PATCH',
-        body: JSON.stringify({ name, goal, startDate, endDate })
+        body: JSON.stringify({
+          name, goal, startDate, endDate,
+          ...(mode === 'create' ? {
+            ...(boardId ? { boardId } : {}),
+            taskKeys: selectedTaskKeys
+          } : {})
+        })
       });
-      await onSaved();
+      await onSaved(savedSprint);
     } catch (submitError) {
       setError(submitError.message);
     } finally {
@@ -303,13 +429,37 @@ function SprintModal({ mode, sprint, token, onClose, onSaved }) {
       <label>Sprint name<input value={name} onChange={(event) => setName(event.target.value)} required autoFocus placeholder="e.g. Sprint 15 - Platform Hardening" /></label>
       <label>Sprint goal<textarea rows={3} value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="What does this sprint achieve?" /></label>
       <div className="form-grid">
-        <label>Start date<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} required /></label>
-        <label>Duration<input value={`${SPRINT_DURATION_DAYS} days`} readOnly tabIndex={-1} /></label>
+        <label>Start date<input type="date" value={startDate} onChange={(event) => {
+          setStartDate(event.target.value);
+          if (event.target.value && isCalendarDate(event.target.value)) setEndDate(endDateForStart(event.target.value));
+          if (event.target.value !== todayIso) setSelectedTaskKeys([]);
+        }} required /></label>
+        <label>End date<input type="date" min={startDate || undefined} value={endDate} onChange={(event) => setEndDate(event.target.value)} required /></label>
       </div>
+      {mode === 'create' && <fieldset className="sb-backlog-picker" disabled={!sprintStartsToday || saving}>
+        <legend>Product Backlog tasks <span>{selectedTaskKeys.length} selected</span></legend>
+        {!sprintStartsToday && <p>Backlog tasks can be added when the sprint starts today. You can move them from the backlog later.</p>}
+        {sprintStartsToday && !selectableTasks.length && <p>No Product Backlog tasks are available for this board.</p>}
+        {sprintStartsToday && selectableTasks.length > 0 && <div className="sb-backlog-picker-list">
+          {selectableTasks.map((task) => {
+            const checked = selectedTaskKeys.includes(task.key);
+            return <label key={task.key}>
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={!checked && selectedTaskKeys.length >= 100}
+                onChange={() => setSelectedTaskKeys((current) => checked ? current.filter((key) => key !== task.key) : [...current, task.key])}
+              />
+              <span><strong>{task.key}</strong> {task.title}</span>
+              <small>{task.storyPoints || 0} SP</small>
+            </label>;
+          })}
+        </div>}
+      </fieldset>}
       <p className="sb-modal-note">
-        {isCalendarDate(startDate)
-          ? <><Check size={13} /> {range} · Day 1 is the start date, Day {SPRINT_DURATION_DAYS} is {range.split(' - ')[1]}.</>
-          : <><AlertTriangle size={13} /> Pick a start date; the end date and {SPRINT_DURATION_DAYS}-day window are derived from it.</>}
+        {isCalendarDate(startDate) && isCalendarDate(endDate)
+          ? <><Check size={13} /> {range} · {Math.round((new Date(`${endDate}T00:00:00Z`) - new Date(`${startDate}T00:00:00Z`)) / 86400000) + 1} days.</>
+          : <><AlertTriangle size={13} /> Pick valid start and end dates. New sprints default to {SPRINT_DURATION_DAYS} days.</>}
       </p>
       <div className="modal-actions">
         <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>

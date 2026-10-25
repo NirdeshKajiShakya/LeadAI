@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { SPRINT_DURATION_DAYS, isValidIsoDate } from '../lib/sprintDates.js';
+import { diffCalendarDays, isValidIsoDate } from '../lib/sprintDates.js';
 
 const sprintSchema = new mongoose.Schema({
   ownerId: { type: String, required: true, index: true },
@@ -15,6 +15,8 @@ const sprintSchema = new mongoose.Schema({
 });
 
 sprintSchema.index({ ownerId: 1, createdAt: 1 });
-sprintSchema.virtual('durationDays').get(() => SPRINT_DURATION_DAYS);
+sprintSchema.virtual('durationDays').get(function durationDays() {
+  return diffCalendarDays(this.startDate, this.endDate) + 1;
+});
 
 export const Sprint = mongoose.model('Sprint', sprintSchema);

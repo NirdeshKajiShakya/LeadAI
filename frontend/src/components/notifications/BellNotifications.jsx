@@ -1,214 +1,225 @@
-import { useEffect, useState } from 'react';
-import { Bell, Clock, Check, Link, X } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Bell, Check, Clock3, X } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
-const TYPE_LABELS = {
-  task_assigned: 'Task assigned',
-  task_status_changed: 'Task status updated',
-  member_joined: 'Team member joined',
-  member_left: 'Team member left',
-  task_due_soon: 'Task due soon',
-};
-
 const TYPE_ICONS = {
-  task_assigned: <span className="n-type-dot assigned"></span>,
-  task_status_changed: <span className="n-type-dot status"></span>,
-  member_joined: <span className="n-type-dot joined"></span>,
-  member_left: <span className="n-type-dot left"></span>,
-  task_due_soon: <span className="n-type-dot due"></span>,
+  board_invite: 'BI',
+  task_assigned: 'TA',
+  task_review: 'RV',
+  sprint_started: 'SP',
+  system: 'SY'
 };
 
-export default function BellNotifications() {
+export default function BellNotifications({ token, onInvitationAccepted }) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState([]);
   const [isOpen, setIsOpen] = useState(false);
-  const [token, setToken] = useState(null);
-  const [empty, setEmpty] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState('');
 
-  // Get auth token from sessionStorage
-  useEffect(() => {
-    const stored = sessionStorage.getItem('leadai-session');
-    if (stored) setToken(stored);
-  }, []);
+  const request = useCallback(async (path, options = {}) => {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.headers || {})
+      }
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(body?.error || `Notification request failed (${response.status}).`);
+    return body;
+  }, [token]);
 
-  // Fetch full notification list
-  const fetchNotifications = async () => {
+  const fetchNotifications = useCallback(async () => {
     if (!token) return;
     setRefreshing(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/notifications`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        const list = Array.isArray(data.notifications) ? data.notifications : [];
-        setNotifications(list);
-        setUnreadCount(data.total ?? list.filter((n) => !n.read).length);
-        setEmpty(list.length === 0);
-      }
-    } catch (error) {
-      console.warn('[bell] Failed to fetch notifications:', error);
-      setEmpty(true);
+      const data = await request('/api/notifications');
+      const list = Array.isArray(data.notifications) ? data.notifications : [];
+      setNotifications(list);
+      setUnreadCount(Number(data.unreadCount ?? list.filter((item) => item.status === 'unread' || !item.read).length));
+      setError('');
+    } catch (fetchError) {
+      console.error('[notifications] Failed to load notifications:', fetchError);
+      setError(fetchError.message);
     } finally {
       setRefreshing(false);
     }
-  };
-
-  // Fetch unread count
-  const fetchUnreadCount = async () => {
-    if (!token) return;
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/notifications/unread`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setUnreadCount(data.total ?? 0);
-      }
-    } catch (error) {
-      console.warn('[bell] Failed to fetch unread count:', error);
-    }
-  };
+  }, [request, token]);
 
   useEffect(() => {
-    if (!token) return;
-    fetchUnreadCount();
-    const timeoutId = setInterval(fetchUnreadCount, 25000);
-    return () => clearInterval(timeoutId);
-  }, [token]);
-
-  useEffect(() => {
-    if (!token) return;
     fetchNotifications();
-    const timeoutId = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(timeoutId);
-  }, [token]);
-
-  // Mark single notification as read
-  const markAsRead = async (notificationId) => {
-    if (!token) return;
-    try {
-      await fetch(`${API_BASE_URL}/api/notifications/${notificationId}/read`, {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setNotifications((list) =>
-        list.map((n) => (n._id === notificationId ? { ...n, read: true, readAt: new Date() } : n))
-      );
-      setUnreadCount((c) => Math.max(0, c - 1));
-    } catch (error) {
-      console.error('[bell] Failed to mark notification as read:', error);
-    }
-  };
-
-  // Mark all notifications as read
-  const markAllRead = async () => {
-    if (!token) return;
-    try {
-      await fetch(`${API_BASE_URL}/api/notifications/read-all`, {
-        method: 'PATCH',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setNotifications((list) =>
-        list.map((n) => ({ ...n, read: true, readAt: new Date() }))
-      );
-      setUnreadCount(0);
-    } catch (error) {
-      console.error('[bell] Failed to mark all notifications as read:', error);
-    }
-  };
-
-  // Handle outside click
-  const handleOutsideClick = (event) => {
-    if (event.target.closest('.n-bell-wrap')) return;
-    setIsOpen(false);
-  };
+    const interval = window.setInterval(fetchNotifications, 30_000);
+    return () => window.clearInterval(interval);
+  }, [fetchNotifications]);
 
   useEffect(() => {
-    document.addEventListener('mousedown', handleOutsideClick);
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
-  }, []);
+    if (!isOpen) return undefined;
+    function closeOnOutsideClick(event) {
+      if (event.target instanceof Element && !event.target.closest('.n-bell-wrap')) setIsOpen(false);
+    }
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick);
+  }, [isOpen]);
+
+  const updateRead = async (notification) => {
+    if (notification.status !== 'unread' && notification.read) return;
+    try {
+      await request(`/api/notifications/${encodeURIComponent(notification._id)}/read`, { method: 'PATCH' });
+      setNotifications((current) => current.map((item) => item._id === notification._id
+        ? { ...item, status: 'read', read: true }
+        : item));
+      setUnreadCount((count) => Math.max(0, count - 1));
+    } catch (readError) {
+      console.error('[notifications] Failed to mark notification as read:', readError);
+      setError(readError.message);
+    }
+  };
+
+  const markAllRead = async () => {
+    try {
+      await request('/api/notifications/read-all', { method: 'PATCH' });
+      setNotifications((current) => current.map((item) => item.status === 'actioned'
+        ? item
+        : { ...item, status: 'read', read: true }));
+      setUnreadCount(0);
+      setError('');
+    } catch (readError) {
+      console.error('[notifications] Failed to mark all notifications as read:', readError);
+      setError(readError.message);
+    }
+  };
+
+  const dismiss = async (notification) => {
+    try {
+      await request(`/api/notifications/${encodeURIComponent(notification._id)}`, { method: 'DELETE' });
+      setNotifications((current) => current.filter((item) => item._id !== notification._id));
+      if (notification.status === 'unread' || !notification.read) setUnreadCount((count) => Math.max(0, count - 1));
+      setError('');
+    } catch (deleteError) {
+      console.error('[notifications] Failed to dismiss notification:', deleteError);
+      setError(deleteError.message);
+    }
+  };
+
+  const respondToInvite = async (notification, action) => {
+    try {
+      await request('/api/boards/invite/respond', {
+        method: 'POST',
+        body: JSON.stringify({ notificationId: notification._id, action })
+      });
+      if (action === 'accept' && onInvitationAccepted) {
+        try {
+          await onInvitationAccepted();
+        } catch (refreshError) {
+          console.error('[notifications] Invitation was accepted but boards could not refresh:', refreshError);
+          setError(`Invitation accepted. Reload to refresh your boards: ${refreshError.message}`);
+        }
+      }
+      await fetchNotifications();
+    } catch (actionError) {
+      console.error('[notifications] Failed to respond to board invitation:', actionError);
+      setError(actionError.message);
+    }
+  };
+
+  const formatTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const minutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`;
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
 
   if (!token) return null;
-
-  const handleBellClick = (e) => {
-    e.stopPropagation();
-    setIsOpen((prev) => !prev);
-  };
-
-  const typeIcon = (type) => TYPE_ICONS[type] || <span className="n-type-dot default"></span>;
-  const typeText = (type) => TYPE_LABELS[type] || type;
-
-  const formatTime = (iso) => {
-    if (!iso) return '';
-    const d = new Date(iso);
-    const now = new Date();
-    const diffMs = now.getTime() - d.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  };
-
   return (
-    <div className="n-bell-wrap" onClick={(e) => e.stopPropagation()}>
-      <button className="n-bell-btn" aria-label="Notifications" title="Notifications" onClick={handleBellClick}>
+    <div className="n-bell-wrap">
+      <button
+        type="button"
+        className="n-bell-btn"
+        aria-label={`Notifications${unreadCount ? `, ${unreadCount} unread` : ''}`}
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((open) => !open)}
+      >
         <Bell size={16} className="n-bell-icon" />
-        {unreadCount > 0 && <span className="n-unread-badge">{unreadCount}</span>}
+        {unreadCount > 0 && <span className="n-unread-badge">{unreadCount > 99 ? '99+' : unreadCount}</span>}
       </button>
       {isOpen && (
-        <div className="n-dropdown">
-          <div className="n-dropdown-head">
-            <span className="n-dropdown-title">Notifications</span>
-            <div className="n-dropdown-actions">
-              <button className="n-refresh-btn" onClick={(e) => { e.stopPropagation(); fetchNotifications(); }} aria-label="Refresh" disabled={refreshing}>
-                {refreshing ? <span style={{fontSize:12, width:14, height:14, border:'2px solid currentColor', borderRadius:'50%', borderRightColor:'transparent', animation:'n-spin .8s linear infinite'}}></span> : <X size={12} />}
-              </button>
-              <button className="n-close-btn" onClick={(e) => { e.stopPropagation(); setIsOpen(false); }} aria-label="Close">
-                <X size={14} />
-              </button>
+        <section className="n-dropdown" role="dialog" aria-label="Notifications">
+          <header className="n-dropdown-head">
+            <div>
+              <strong className="n-dropdown-title">Notifications</strong>
+              <span className="n-dropdown-count">{unreadCount ? `${unreadCount} unread` : 'All caught up'}</span>
             </div>
-          </div>
-          {(empty || notifications.length === 0) ? (
-            <div className="n-empty">
-              <div className="n-empty-icon"><Clock size={24} /></div>
-              <p className="n-empty-text">No notifications yet</p>
-              <p className="n-empty-sub">You’ll see updates here when you’re assigned a task, a task status changes, or a teammate joins your team.</p>
-            </div>
-          ) : (
-            <>
-              <div className="n-list">
-                {notifications.map((n) => (
-                  <div key={n._id || n.id} className={`n-item${n.read ? '' : ' n-unread'}`} onClick={() => { if (!n.read) markAsRead(n._id); }}>
-                    <div className="n-item-left">{typeIcon(n.type)}</div>
-                    <div className="n-item-right">
-                      <div className="n-item-head">
-                        <span className="n-item-title">{typeText(n.type)}</span>
-                        <span className="n-item-time">{formatTime(n.createdAt)}</span>
-                        {!n.read && <span className="n-dot"></span>}
-                      </div>
-                      <p className="n-item-body">{n.body}</p>
-                      {n.link && (
-                        <a className="n-item-link" href={n.link} target="_blank" rel="noopener noreferrer">
-                          <Link size={12} /> View
-                        </a>
-                      )}
+            <button type="button" className="n-close-btn" onClick={() => setIsOpen(false)} aria-label="Close notifications">
+              <X size={14} />
+            </button>
+          </header>
+          {error && <p className="n-error" role="alert">{error}</p>}
+          <div className="n-list" aria-busy={refreshing}>
+            {notifications.length ? notifications.map((notification) => {
+              const isPendingInvite = notification.type === 'board_invite'
+                && notification.metadata?.inviteStatus === 'pending';
+              return (
+                <article
+                  key={notification._id}
+                  className={`n-item${notification.status === 'unread' || !notification.read ? ' n-unread' : ''}`}
+                  onClick={() => !isPendingInvite && updateRead(notification)}
+                >
+                  <span className={`n-item-icon n-icon-${notification.type || 'system'}`} aria-hidden="true">
+                    {TYPE_ICONS[notification.type] || 'N'}
+                  </span>
+                  <div className="n-item-right">
+                    <div className="n-item-head">
+                      <strong className="n-item-title">{notification.title || notification.type}</strong>
+                      <time className="n-item-time">{formatTime(notification.createdAt)}</time>
                     </div>
+                    <p className="n-item-body">{notification.message || notification.body}</p>
+                    {isPendingInvite ? (
+                      <div className="n-invite-actions">
+                        <button type="button" className="n-accept-button" onClick={() => respondToInvite(notification, 'accept')}>Accept</button>
+                        <button type="button" className="n-decline-button" onClick={() => respondToInvite(notification, 'decline')}>Decline</button>
+                      </div>
+                    ) : notification.type === 'board_invite' ? (
+                      <span className="n-invite-result">
+                        {notification.metadata?.inviteStatus === 'accepted' ? 'Invitation accepted' : 'Invitation declined'}
+                      </span>
+                    ) : null}
                   </div>
-                ))}
+                  <button
+                    type="button"
+                    className="n-dismiss-button"
+                    aria-label={`Dismiss ${notification.title || 'notification'}`}
+                    onClick={() => dismiss(notification)}
+                  >
+                    <X size={14} />
+                  </button>
+                </article>
+              );
+            }) : (
+              <div className="n-empty">
+                <Clock3 size={21} />
+                <strong>No notifications yet</strong>
+                <span>Board invitations and task updates will show up here.</span>
               </div>
-              <div className="n-footer">
-                <button className="n-mark-all" onClick={(e) => { e.stopPropagation(); markAllRead(); }}>
-                  <Check size={14} /> Mark all read
-                </button>
-              </div>
-            </>
+            )}
+          </div>
+          {notifications.length > 0 && (
+            <footer className="n-footer">
+              <button type="button" className="n-mark-all" onClick={markAllRead} disabled={!unreadCount}>
+                <Check size={14} /> Mark all as read
+              </button>
+              <button type="button" className="n-refresh-btn" onClick={fetchNotifications} disabled={refreshing} aria-label="Refresh notifications">
+                <span className={refreshing ? 'n-refresh-spin' : ''}>↻</span>
+              </button>
+            </footer>
           )}
-        </div>
+        </section>
       )}
     </div>
   );

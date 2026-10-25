@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Task } from './models/Task.js';
 import { Sprint } from './models/Sprint.js';
-import { endDateForStart, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
+import { endDateForStart, diffCalendarDays, summarizeTasks, computeSprintDay, validateSprintRange, todayIsoDate } from './lib/sprintDates.js';
 import { sortBacklog } from './lib/backlogOrder.js';
 import {
   BACKLOG_STATUS, SPRINT_ENTRY_STATUS, isPermittedSprintStatusChange,
@@ -17,6 +17,16 @@ import {
 import { User, USERNAME_PATTERN } from './models/User.js';
 import { connectDatabase, databaseStatus, reconnectDatabase } from './db.js';
 import { Board } from './models/Board.js';
+import { TaskHistory } from './models/TaskHistory.js';
+import {
+  createInAppNotification, listNotifications, countUnreadNotifications, findNotificationForRecipient,
+  updateNotificationForRecipient, markAllNotificationsRead, deleteNotificationForRecipient,
+  setNotificationDatabaseReady
+} from './lib/notificationStore.js';
+import {
+  getAutomationRules, saveAutomationRules, validateAutomationRuleUpdates,
+  setAutomationDatabaseReady
+} from './lib/automationSettingsStore.js';
 import {
   createAuthError, isAuthError, createUser, authenticateUser, createAuthSession,
   requireAuth, invalidateSession, revokeAllSessionsForUser, validatePassword,
@@ -25,8 +35,10 @@ import {
   findUserByEmail, findUserById
 } from './auth.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH, findBestSkilledMember, pickRandomMember } from './ai.js';
+import { aiStoryPoints, isValidStoryPoints } from './lib/storyPoints.js';
 import {
-  setOverride, removeOverride, clearOverrides, getAllEffective
+  setOverride, removeOverride, clearOverrides, getAllEffective, getEffective,
+  getOverride, markSetupComplete, isSetupComplete
 } from './lib/envConfig.js';
 import{
   BOARD_SUMMARY_LIMIT, PRIORITY_TASK_LIMIT, activeSprintsOf, isOpenTask, isOverdueTask,
@@ -92,20 +104,7 @@ function starterTasksFor(user) {
   ];
 }
 let memoryTasks = [];
-function seedSprint(ownerId, boardId = null) {
-  const start = new Date(`${todayIsoDate()}T00:00:00Z`);
-  start.setUTCDate(start.getUTCDate() - 3);
-  const startDate = start.toISOString().slice(0, 10);
-  return {
-    name: 'Q3 Product Engineering Sprint 14',
-    goal: 'Ship the core orchestration engine v2.4 with a working LLM fallback matrix.',
-    startDate,
-    endDate: endDateForStart(startDate),
-    ownerId: String(ownerId),
-    boardId: boardId ? String(boardId) : null,
-    createdAt: new Date()
-  };
-}
+const memoryAutomationHistory = [];
 const sprintId = (sprint) => String(sprint._id ?? sprint.id);
 const boardId = (board) => String(board._id ?? board.id);
 let memorySprintCounter = 0;
@@ -122,17 +121,32 @@ async function seedStarterTasks(user, board) {
 
 async function connectMongo() {
   const status = await connectDatabase();
-  mongoReady = status.mode === 'mongodb';
-  setDatabaseReady(mongoReady);
+  updateDatabaseReadiness(status);
   return status;
+}
+
+function updateDatabaseReadiness(status = databaseStatus()) {
+  mongoReady = status.mode === 'mongodb' && status.ready;
+  setDatabaseReady(mongoReady);
+  setNotificationDatabaseReady(mongoReady);
+  setAutomationDatabaseReady(mongoReady);
 }
 
 const store = {
   list: () => mongoReady ? Task.find().sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks),
+  listOverdue: () => {
+    if (!mongoReady) return Promise.resolve(memoryTasks.filter((task) => taskIsOverdue(task)));
+    return Task.find({
+      status: { $ne: 'done' },
+      dueDate: { $lt: new Date() },
+      'automationFlags.overdueEscalated': { $ne: true }
+    }).sort({ dueDate: 1 }).limit(500).lean();
+  },
   find: (key) => mongoReady ? Task.findOne({ key }) : Promise.resolve(memoryTasks.find((task) => task.key === key)),
   create: async (data) => {
-    if (mongoReady) return new Task(data).save();
-    const task = { ...data, _id: crypto.randomUUID(), createdAt: new Date(), updatedAt: new Date() };
+    const taskData = { ...data, storyPoints: data.storyPoints ?? 0 };
+    if (mongoReady) return new Task(taskData).save();
+    const task = { ...taskData, _id: crypto.randomUUID(), createdAt: new Date(), updatedAt: new Date() };
     memoryTasks = [...memoryTasks, task];
     return task;
   },
@@ -149,18 +163,41 @@ const store = {
     memoryTasks = memoryTasks.filter((task) => task.key !== key);
     return { deletedCount: before - memoryTasks.length };
   },
-  listBySprint: (id) => mongoReady ? Task.find({ sprintId: id }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.sprintId) === String(id))),
+  listBySprint: (id, boardId) => {
+    if (!mongoReady) return Promise.resolve(memoryTasks.filter((task) =>
+      String(task.sprintId) === String(id)
+      && (!boardId || String(task.boardId || '') === String(boardId))
+    ));
+    const filter = { sprintId: id };
+    if (boardId) filter.boardId = boardId;
+    return Task.find(filter).sort({ createdAt: 1 }).lean();
+  },
   // Board and profile queries are owner-scoped in the database; a shared database must
   // never require loading every developer's tasks to show one person's board.
   listByOwner: (ownerId) => mongoReady ? Task.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.ownerId) === String(ownerId))),
-  listWithoutSprint: (ownerId) => {
-    if (!mongoReady) return Promise.resolve(memoryTasks.filter((task) => !task.sprintId && (!ownerId || String(task.ownerId) === String(ownerId))));
-    return Task.find(ownerId ? { sprintId: null, ownerId } : { sprintId: null }).sort({ createdAt: 1 }).lean();
+  listWithoutSprint: (ownerId, boardId) => {
+    if (!mongoReady) return Promise.resolve(memoryTasks.filter((task) =>
+      !task.sprintId
+      && (!ownerId || String(task.ownerId) === String(ownerId))
+      && (!boardId || String(task.boardId || '') === String(boardId))
+    ));
+    const filter = { sprintId: null };
+    if (ownerId) filter.ownerId = ownerId;
+    if (boardId) filter.boardId = boardId;
+    return Task.find(filter).sort({ createdAt: 1 }).lean();
   }
 };
 
 const sprintStore = {
-  list: (ownerId) => mongoReady ? Sprint.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memorySprints.filter((sprint) => String(sprint.ownerId) === String(ownerId))),
+  list: (ownerId, boardId) => {
+    if (!mongoReady) return Promise.resolve(memorySprints.filter((sprint) =>
+      String(sprint.ownerId) === String(ownerId)
+      && (!boardId || String(sprint.boardId || '') === String(boardId))
+    ));
+    const filter = { ownerId };
+    if (boardId) filter.boardId = boardId;
+    return Sprint.find(filter).sort({ createdAt: 1 }).lean();
+  },
   find: (id, ownerId) => {
     if (!mongoReady) return Promise.resolve(memorySprints.find((sprint) => sprintId(sprint) === String(id) && String(sprint.ownerId) === String(ownerId)));
     // A malformed id would otherwise throw a CastError and surface as a 500.
@@ -178,6 +215,12 @@ const sprintStore = {
     if (!current) return null;
     memorySprints = memorySprints.map((sprint) => sprintId(sprint) === String(id) ? { ...sprint, ...data } : sprint);
     return sprintStore.find(id, ownerId);
+  },
+  remove: async (id, ownerId) => {
+    if (mongoReady) return Sprint.deleteOne({ _id: id, ownerId });
+    const before = memorySprints.length;
+    memorySprints = memorySprints.filter((sprint) => sprintId(sprint) !== String(id) || String(sprint.ownerId) !== String(ownerId));
+    return { deletedCount: before - memorySprints.length };
   }
 };
 
@@ -233,16 +276,10 @@ async function defaultBoardFor(req) {
   return boards[0] || null;
 }
 
-async function ensureDefaultSprint(ownerId) {
-  const existing = await sprintStore.list(ownerId);
-  if (existing.length) return existing[0];
-  return sprintStore.create(seedSprint(ownerId));
-}
-
 function sprintView(sprint, tasks = []) {
   const progress = summarizeTasks(tasks);
   const current = computeSprintDay(sprint.startDate, sprint.endDate);
-  return { ...sprint, id: sprintId(sprint), durationDays: 14, progress, current };
+  return { ...sprint, id: sprintId(sprint), durationDays: diffCalendarDays(sprint.startDate, sprint.endDate) + 1, progress, current };
 }
 
 async function authorizedSprint(req, res) {
@@ -254,6 +291,10 @@ async function authorizedSprint(req, res) {
   const sprint = await sprintStore.find(id, userId(req));
   if (!sprint) {
     res.status(404).json({ error: 'Sprint not found.' });
+    return null;
+  }
+  if (req.query.boardId && String(req.query.boardId) !== String(sprint.boardId || '')) {
+    res.status(404).json({ error: 'Sprint not found on this board.' });
     return null;
   }
   return sprint;
@@ -319,7 +360,7 @@ async function assignedOpenTaskCounts(accessibleIds, names, today) {
   return { open: mine.length, overdue: mine.filter((task) => isOverdueTask(task, today)).length };
 }
 
-async function buildDashboard(req) {
+async function buildDashboard(req, requestedBoardId = null) {
   const uid = userId(req);
   const user = req.user || {};
   const today = todayIsoDate();
@@ -339,11 +380,14 @@ async function buildDashboard(req) {
 
   // No active sprint is created here: the dashboard is read-only, so opening it
   // never mutates sprint or task state.
-  const activeSprints = activeSprintsOf(sprints, today);
+  const allActiveSprints = activeSprintsOf(sprints, today);
+  const activeSprints = requestedBoardId === null
+    ? allActiveSprints
+    : allActiveSprints.filter((sprint) => String(sprint.boardId || '') === String(requestedBoardId));
   const active = activeSprints[0] || null;
   let activeSprint = null;
   if (active) {
-    const sprintTasks = await store.listBySprint(sprintId(active));
+    const sprintTasks = await store.listBySprint(sprintId(active), active.boardId);
     const view = sprintView(active, sprintTasks);
     const linkedBoard = (active.boardId ? boardById.get(String(active.boardId)) : null)
       || (sprintTasks[0]?.boardId ? boardById.get(String(sprintTasks[0].boardId)) : null);
@@ -372,7 +416,7 @@ async function buildDashboard(req) {
     .map((board) => {
       const id = boardId(board);
       const counts = boardCounts.get(id) || { total: 0, open: 0 };
-      const linkedSprint = activeSprints.find((sprint) => String(sprint.boardId || '') === id)
+      const linkedSprint = allActiveSprints.find((sprint) => String(sprint.boardId || '') === id)
         || (active && activeSprint?.boardId === id ? active : null);
       return {
         id,
@@ -435,6 +479,105 @@ async function boardMembers(board) {
     skills: Array.isArray(member.skills) ? member.skills : []
   }));
 }
+async function dispatchAutomation(boardIdValue, ruleName, operation) {
+  try {
+    const rules = await getAutomationRules(String(boardIdValue));
+    if (!rules[ruleName]) return;
+    return await operation();
+  } catch (error) {
+    console.error(`[automation] ${ruleName} dispatch failed:`, error);
+  }
+}
+async function notifySafely(notification) {
+  try {
+    await createInAppNotification(notification);
+    return true;
+  } catch (error) {
+    console.error('[notification] In-app dispatch failed:', error);
+    return false;
+  }
+}
+async function writeAutomationHistory({ task, actorId, from = task.status, to = task.status, note }) {
+  const at = new Date();
+  if (mongoReady && task._id) {
+    return TaskHistory.create({
+      taskId: task._id,
+      teamId: task.sprintId || null,
+      from,
+      to,
+      actorId,
+      source: 'automation',
+      note,
+      at
+    });
+  }
+  const entry = {
+    id: crypto.randomUUID(),
+    taskKey: String(task.key),
+    teamId: task.sprintId || null,
+    from,
+    to,
+    actorId: String(actorId),
+    source: 'automation',
+    note,
+    at
+  };
+  memoryAutomationHistory.push(entry);
+  return entry;
+}
+async function resolveTaskAssignee(task, board) {
+  const members = await boardMembers(board);
+  const assigned = members.find((member) => String(member.id) === String(task.assigneeId))
+    || members.find((member) => member.name.toLowerCase() === String(task.assignee || '').toLowerCase()
+      || member.email.toLowerCase() === String(task.assignee || '').toLowerCase());
+  return assigned || null;
+}
+function calendarDay(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+}
+function taskIsOverdue(task, now = new Date()) {
+  return task.status !== 'done' && Boolean(task.dueDate)
+    && calendarDay(task.dueDate) < now.toISOString().slice(0, 10);
+}
+async function escalateOverdueTask(task, board, now = new Date()) {
+  const current = await store.find(task.key);
+  if (!current || !taskIsOverdue(current, now) || current.automationFlags?.overdueEscalated) return;
+  const updated = await store.update(current.key, {
+    priority: current.priority === 'urgent' ? 'urgent' : 'high',
+    automationFlags: { ...(current.automationFlags || {}), overdueEscalated: true, overdueNotifiedAt: now }
+  });
+  if (!updated) return;
+  const recipient = await resolveTaskAssignee(updated, board);
+  if (recipient) {
+    await notifySafely({
+      recipient: recipient.id,
+      type: 'system',
+      title: 'Overdue task escalated',
+      message: `${updated.key}: ${updated.title} is overdue and was raised to High priority.`,
+      relatedId: updated._id || updated.key,
+      metadata: { boardId: boardId(board), taskKey: updated.key, priority: 'high' }
+    });
+  }
+}
+async function scanOverdueTasks() {
+  try {
+    const tasks = await store.listOverdue();
+    for (const task of tasks) {
+      try {
+        if (!task.boardId || !taskIsOverdue(task) || task.automationFlags?.overdueEscalated) continue;
+        const board = await boardStore.find(task.boardId);
+        if (!board) continue;
+        await dispatchAutomation(boardId(board), 'overduePriorityEscalation', () => escalateOverdueTask(task, board));
+      } catch (error) {
+        console.error('[automation] overdue task scan failed for task:', task?.key, error);
+      }
+    }
+  } catch (error) {
+    console.error('[automation] overdue task scan failed:', error);
+  }
+}
 function resolveBoardAssignee(value, members) {
   const requested = String(value || 'Unassigned').trim();
   if (!requested || requested.toLowerCase() === 'unassigned') return 'Unassigned';
@@ -465,13 +608,25 @@ function validateTaskInput(body, partial = false) {
   if (body.priority !== undefined && !allowedPriorities.includes(body.priority)) throw createAuthError(400, 'Invalid priority.');
   if (body.labels !== undefined && (!Array.isArray(body.labels) || body.labels.length > 10 || body.labels.some((label) => typeof label !== 'string' || !label.trim() || label.length > 40))) throw createAuthError(400, 'Labels must be non-empty text values.');
   if (body.assignee !== undefined && (typeof body.assignee !== 'string' || body.assignee.trim().length > 120)) throw createAuthError(400, 'Assignee must be text up to 120 characters.');
+  if (body.assigneeId !== undefined && body.assigneeId !== null
+    && (typeof body.assigneeId !== 'string' || !/^[a-zA-Z0-9_-]{8,64}$/.test(body.assigneeId))) {
+    throw createAuthError(400, 'Invalid assignee id.');
+  }
+  if (body.checklist !== undefined && (!Array.isArray(body.checklist) || body.checklist.length > 50
+    || body.checklist.some((item) => !item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.text !== 'string' || !item.text.trim() || item.text.trim().length > 240
+      || (item.completed !== undefined && typeof item.completed !== 'boolean')))) {
+    throw createAuthError(400, 'Checklist items must have text up to 240 characters and an optional completed boolean.');
+  }
   if (body.dueDate !== undefined && (typeof body.dueDate !== 'string' || body.dueDate.length > 40)) throw createAuthError(400, 'Due date must be text up to 40 characters.');
   if (body.sprintId !== undefined && (body.sprintId !== null && (typeof body.sprintId !== 'string' || !/^[a-zA-Z0-9_-]{8,}$/.test(body.sprintId)))) throw createAuthError(400, 'Invalid sprint id.');
-  if (body.storyPoints !== undefined && (!Number.isInteger(body.storyPoints) || body.storyPoints < 0 || body.storyPoints > 100)) throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
+  if (body.storyPoints !== undefined && !isValidStoryPoints(body.storyPoints)) {
+    throw createAuthError(400, 'Story points must be an integer from 0 to 100.');
+  }
 }
 function validTaskKey(key) { return typeof key === 'string' && /^KAN-[A-Z0-9]+$/i.test(key); }
 function taskUpdates(body) {
-  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate', 'sprintId', 'storyPoints'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
+  return Object.fromEntries(['title', 'description', 'status', 'priority', 'labels', 'assignee', 'assigneeId', 'dueDate', 'sprintId', 'storyPoints', 'checklist'].filter((field) => body[field] !== undefined).map((field) => [field, body[field]]));
 }
 function dependencyGraph(tasks) {
   const graph = new Map(tasks.map((task) => [task.key, (task.dependencies || []).map((dep) => dep.toTask)]));
@@ -678,8 +833,90 @@ app.get('/api/health', (_req, res) => {
   const ok = status.mode === 'memory' ? true : status.ready;
   res.status(ok ? 200 : 503).json({ ok, database: status.mode, db: status.name });
 });
+app.get('/api/system/status', (_req, res) => {
+  const database = databaseStatus();
+  const mongodbUri = String(getEffective('MONGODB_URI')).trim();
+  const usingLocalDefault = !mongodbUri || mongodbUri === 'mongodb://localhost:27017/leadai';
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    mongodb: {
+      configured: Boolean(mongodbUri),
+      usingLocalDefault,
+      connected: database.mode === 'mongodb' && database.ready,
+      mode: database.mode
+    },
+    openrouter: {
+      configured: Boolean(String(getEffective('OPENROUTER_API_KEY')).trim()),
+      modelConfigured: Boolean(String(getEffective('OPENROUTER_MODEL')).trim())
+    },
+    setupRequired: !isSetupComplete()
+  });
+});
+
+app.post('/api/system/configure', requireAuth, async (req, res) => {
+  const { databaseMode, mongodbUri, openrouterApiKey, skipAI } = req.body || {};
+  if (!['local', 'cloud'].includes(databaseMode)) {
+    return res.status(400).json({ error: 'Choose either the local default or a cloud MongoDB URI.' });
+  }
+  if (skipAI !== true && (typeof openrouterApiKey !== 'string' || !openrouterApiKey.trim())) {
+    return res.status(400).json({ error: 'Provide an OpenRouter API key or choose demo mode.' });
+  }
+
+  const nextMongoUri = databaseMode === 'local'
+    ? 'mongodb://localhost:27017/leadai'
+    : String(mongodbUri || '').trim();
+  if (!/^mongodb(?:\+srv)?:\/\//.test(nextMongoUri)) {
+    return res.status(400).json({ error: 'The MongoDB URI must start with mongodb:// or mongodb+srv://.' });
+  }
+  const databaseName = /^mongodb(?:\+srv)?:\/\/[^/]*\/([^?]+)/.exec(nextMongoUri);
+  if (!databaseName?.[1]) {
+    return res.status(400).json({ error: 'The MongoDB URI must include a database name.' });
+  }
+
+  const previousMongoOverride = getOverride('MONGODB_URI');
+  const previousOpenrouterOverride = getOverride('OPENROUTER_API_KEY');
+  const previousMongoUri = String(getEffective('MONGODB_URI') || '').trim() || 'mongodb://localhost:27017/leadai';
+  const uriChanged = nextMongoUri !== previousMongoUri;
+
+  try {
+    setOverride('MONGODB_URI', nextMongoUri);
+    if (!skipAI) setOverride('OPENROUTER_API_KEY', openrouterApiKey.trim());
+    if (uriChanged) {
+      try {
+        const status = await reconnectDatabase();
+        updateDatabaseReadiness(status);
+      } catch {
+        if (previousMongoOverride === undefined) removeOverride('MONGODB_URI');
+        else setOverride('MONGODB_URI', previousMongoOverride);
+        if (previousOpenrouterOverride === undefined) removeOverride('OPENROUTER_API_KEY');
+        else setOverride('OPENROUTER_API_KEY', previousOpenrouterOverride);
+        try {
+          const restoredStatus = await reconnectDatabase();
+          updateDatabaseReadiness(restoredStatus);
+        } catch {
+          updateDatabaseReadiness();
+          return res.status(503).json({
+            error: 'Could not connect to the selected database, and the previous database connection could not be restored.'
+          });
+        }
+        return res.status(400).json({ error: 'Could not connect to the selected MongoDB database. Previous settings were restored.' });
+      }
+    }
+    markSetupComplete();
+    console.info('[system] Initial setup completed.');
+    res.json({ saved: true, setupRequired: false });
+  } catch (error) {
+    console.error('[system] Could not apply initial setup:', error.message);
+    res.status(500).json({ error: 'Could not save the setup configuration.' });
+  }
+});
 app.get('/api/dashboard/summary', requireAuth, async (req, res, next) => {
-  try { res.json(await buildDashboard(req)); } catch (error) { next(error); }
+  try {
+    const hasBoardFilter = Object.hasOwn(req.query, 'boardId');
+    const requestedBoardId = hasBoardFilter ? String(req.query.boardId || '').trim() : null;
+    if (requestedBoardId && !await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
+    res.json(await buildDashboard(req, requestedBoardId));
+  } catch (error) { next(error); }
 });
 
 app.get('/api/settings/env', requireAuth, (_req, res) => {
@@ -771,6 +1008,56 @@ app.get('/api/boards', requireAuth, async (req, res, next) => {
     }))));
   } catch (error) { next(error); }
 });
+app.get('/api/notifications', requireAuth, async (req, res, next) => {
+  try {
+    const [notifications, unreadCount] = await Promise.all([
+      listNotifications(userId(req)),
+      countUnreadNotifications(userId(req))
+    ]);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ notifications, unreadCount, total: unreadCount });
+  } catch (error) { next(error); }
+});
+app.patch('/api/notifications/:id/read', requireAuth, async (req, res, next) => {
+  try {
+    const notification = await updateNotificationForRecipient(req.params.id, userId(req), { status: 'read' });
+    if (!notification) return res.status(404).json({ error: 'Notification not found.' });
+    res.json(notification);
+  } catch (error) { next(error); }
+});
+app.patch('/api/notifications/read-all', requireAuth, async (req, res, next) => {
+  try {
+    const updated = await markAllNotificationsRead(userId(req));
+    res.json({ ok: true, updated });
+  } catch (error) { next(error); }
+});
+app.delete('/api/notifications/:id', requireAuth, async (req, res, next) => {
+  try {
+    const deleted = await deleteNotificationForRecipient(req.params.id, userId(req));
+    if (!deleted) return res.status(404).json({ error: 'Notification not found.' });
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+app.get('/api/automations', requireAuth, async (req, res, next) => {
+  try {
+    const requestedBoardId = String(req.query.boardId || '');
+    if (!requestedBoardId) return res.status(400).json({ error: 'A board is required.' });
+    const board = await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res);
+    if (!board) return;
+    res.json({ boardId: boardId(board), rules: await getAutomationRules(boardId(board)) });
+  } catch (error) { next(error); }
+});
+app.patch('/api/automations', requireAuth, async (req, res, next) => {
+  try {
+    const requestedBoardId = String(req.body?.boardId || '');
+    if (!requestedBoardId) return res.status(400).json({ error: 'A board is required.' });
+    const board = await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res, { ownerOnly: true });
+    if (!board) return;
+    const updates = validateAutomationRuleUpdates(req.body?.rules);
+    if (!updates) return res.status(400).json({ error: 'Provide one or more valid automation rule toggles.' });
+    res.json({ boardId: boardId(board), rules: await saveAutomationRules(boardId(board), updates) });
+  } catch (error) { next(error); }
+});
 app.post('/api/boards', requireAuth, async (req, res, next) => {
   try {
     const name = String(req.body?.name || '').trim();
@@ -807,18 +1094,116 @@ app.post('/api/boards/:id/members', requireAuth, async (req, res, next) => {
     const member = await findUserByEmail(email);
     if (!member) return res.status(404).json({ error: 'No account was found for that email.' });
     const memberId = String(member._id);
-    const memberIds = [...new Set([...(board.memberIds || []).map(String), memberId])];
-    const updated = await boardStore.update(boardId(board), { memberIds });
-    res.status(201).json({ ...updated, id: boardId(updated), isOwner: true });
+    if (memberId === userId(req) || (board.memberIds || []).map(String).includes(memberId)) {
+      return res.status(409).json({ error: 'That user already has access to this board.' });
+    }
+    const current = await listNotifications(memberId, 100);
+    const alreadyPending = current.some((notification) =>
+      notification.type === 'board_invite'
+      && String(notification.metadata?.boardId) === boardId(board)
+      && notification.metadata?.inviteStatus === 'pending'
+    );
+    if (alreadyPending) return res.status(409).json({ error: 'A pending invitation already exists for that user.' });
+    const notificationCreated = await notifySafely({
+      recipient: memberId,
+      sender: userId(req),
+      type: 'board_invite',
+      title: 'Board invitation',
+      message: `${req.user.name || req.user.email} invited you to join "${board.name}".`,
+      relatedId: boardId(board),
+      metadata: {
+        boardId: boardId(board),
+        boardName: board.name,
+        inviterName: req.user.name || req.user.email,
+        inviteStatus: 'pending',
+        role: String(req.body?.role || 'Member')
+      }
+    });
+    if (!notificationCreated) return res.status(503).json({ error: 'The invitation notification could not be created. Please retry.' });
+    res.status(201).json({ ok: true, pending: true, boardId: boardId(board), invitedUserId: memberId });
+  } catch (error) { next(error); }
+});
+app.post('/api/boards/invite/respond', requireAuth, async (req, res, next) => {
+  try {
+    const notificationId = String(req.body?.notificationId || '');
+    const action = req.body?.action;
+    if (!notificationId || !['accept', 'decline'].includes(action)) {
+      return res.status(400).json({ error: 'A notificationId and accept/decline action are required.' });
+    }
+    const notification = await findNotificationForRecipient(notificationId, userId(req));
+    if (!notification || notification.type !== 'board_invite' || notification.metadata?.inviteStatus !== 'pending') {
+      return res.status(404).json({ error: 'Pending board invitation not found.' });
+    }
+    const invitedBoardId = String(notification.metadata.boardId || '');
+    const board = await boardStore.find(invitedBoardId);
+    if (!board) {
+      await updateNotificationForRecipient(notificationId, userId(req), {
+        status: 'actioned',
+        metadata: { ...notification.metadata, inviteStatus: 'expired' }
+      });
+      return res.status(404).json({ error: 'The invited board no longer exists.' });
+    }
+    if (action === 'accept') {
+      const memberIds = [...new Set([...(board.memberIds || []).map(String), userId(req)])];
+      await boardStore.update(boardId(board), { memberIds });
+    }
+    const updated = await updateNotificationForRecipient(notificationId, userId(req), {
+      status: 'actioned',
+      metadata: { ...notification.metadata, inviteStatus: action === 'accept' ? 'accepted' : 'declined' }
+    });
+    res.json({ ok: true, action, notification: updated, boardId: boardId(board) });
   } catch (error) { next(error); }
 });
 app.delete('/api/boards/:id/members/:memberId', requireAuth, async (req, res, next) => {
   try {
-    const board = await authorizedBoard(req, res, { ownerOnly: true });
+    const board = await authorizedBoard(req, res);
     if (!board) return;
-    if (String(req.params.memberId) === userId(req)) return res.status(400).json({ error: 'The board owner cannot be removed.' });
+    const removingSelf = String(req.params.memberId) === userId(req);
+    const isOwner = String(board.ownerId) === userId(req);
+    if (!isOwner && !removingSelf) return res.status(403).json({ error: 'Only the board owner may remove another member.' });
+    if (String(req.params.memberId) === String(board.ownerId)) return res.status(400).json({ error: 'The board owner cannot be removed.' });
+    if (!(board.memberIds || []).map(String).includes(String(req.params.memberId))) {
+      return res.status(404).json({ error: 'Board member not found.' });
+    }
+    const removedMember = await findUserById(req.params.memberId);
     const updated = await boardStore.update(boardId(board), { memberIds: (board.memberIds || []).map(String).filter((id) => id !== String(req.params.memberId)) });
-    res.json({ ...updated, id: boardId(updated), isOwner: true });
+    if (updated && removedMember) {
+      dispatchAutomation(boardId(updated), 'smartMemberReassignment', async () => {
+        const activeMembers = await boardMembers(updated);
+        const loads = new Map(activeMembers.map((member) => [member.id, 0]));
+        const openTasks = (await store.list()).filter((task) =>
+          String(task.boardId || '') === boardId(updated)
+          && task.status !== 'done'
+          && (String(task.assigneeId || '') === String(removedMember._id)
+            || String(task.assignee || '').toLowerCase() === String(removedMember.name || removedMember.email).toLowerCase())
+        );
+        for (const task of openTasks) {
+          if (!activeMembers.length) break;
+          try {
+            const best = findBestSkilledMember(task, activeMembers);
+            const nextMember = best || [...activeMembers].sort((a, b) =>
+              (loads.get(a.id) || 0) - (loads.get(b.id) || 0)
+            )[0];
+            if (!nextMember) continue;
+            const reassigned = await store.update(task.key, { assigneeId: nextMember.id, assignee: nextMember.name });
+            if (!reassigned) continue;
+            loads.set(nextMember.id, (loads.get(nextMember.id) || 0) + 1);
+            try {
+              await writeAutomationHistory({
+                task,
+                actorId: userId(req),
+                note: `AI reassigned this task from ${removedMember.name || removedMember.email} to ${nextMember.name} after their departure.`
+              });
+            } catch (historyError) {
+              console.error(`[automation] could not write reassignment audit note for ${task.key}:`, historyError);
+            }
+          } catch (reassignmentError) {
+            console.error(`[automation] could not reassign ${task.key} after member departure:`, reassignmentError);
+          }
+        }
+      });
+    }
+    res.json({ ...updated, id: boardId(updated), isOwner });
   } catch (error) { next(error); }
 });
 app.post('/api/auth/reset-password/request', async (req, res, next) => {
@@ -852,12 +1237,15 @@ app.post('/api/auth/reset-password', async (req, res, next) => {
 
 app.get('/api/sprints', requireAuth, async (req, res, next) => {
   try {
-    await ensureDefaultSprint(userId(req));
-    const sprints = await sprintStore.list(userId(req));
-    res.json(await Promise.all(sprints.map(async (sprint) => sprintView(sprint, await store.listBySprint(sprintId(sprint))))));
+    const requestedBoardId = req.query.boardId ? String(req.query.boardId) : null;
+    if (requestedBoardId && !await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
+    const sprints = await sprintStore.list(userId(req), requestedBoardId);
+    res.json(await Promise.all(sprints.map(async (sprint) => sprintView(sprint, await store.listBySprint(sprintId(sprint), sprint.boardId)))));
   } catch (error) { next(error); }
 });
 app.post('/api/sprints', requireAuth, async (req, res, next) => {
+  let createdSprint = null;
+  const movedTasks = [];
   try {
     const name = String(req.body?.name || '').trim();
     const goal = String(req.body?.goal || '').trim();
@@ -867,14 +1255,64 @@ app.post('/api/sprints', requireAuth, async (req, res, next) => {
     const endDate = String(req.body?.endDate || endDateForStart(startDate));
     const dateValidation = validateSprintRange(startDate, endDate);
     if (!dateValidation.ok) return res.status(400).json({ error: dateValidation.error });
-    res.status(201).json(sprintView(await sprintStore.create({ ownerId: userId(req), name, goal, startDate, endDate }), []));
-  } catch (error) { next(error); }
+    if (!req.body?.boardId) return res.status(400).json({ error: 'A board is required to create a sprint.' });
+    const board = await authorizedBoard({ ...req, params: { id: String(req.body.boardId) } }, res);
+    if (!board) return;
+    const taskKeys = req.body?.taskKeys ?? [];
+    if (!Array.isArray(taskKeys) || taskKeys.length > 100 || taskKeys.some((key) => typeof key !== 'string') || new Set(taskKeys).size !== taskKeys.length) {
+      return res.status(400).json({ error: 'Select up to 100 unique Product Backlog tasks.' });
+    }
+    const pendingTasks = [];
+    for (const key of taskKeys) {
+      const task = await store.find(key);
+      if (!task || !await canAccess(task, req)) return res.status(404).json({ error: `Task ${key} was not found.` });
+      if (String(task.boardId || '') !== boardId(board)) {
+        return res.status(409).json({ error: `Task ${key} belongs to a different board.` });
+      }
+      pendingTasks.push(task);
+    }
+    const candidateSprint = { ownerId: userId(req), boardId: boardId(board), startDate, endDate, sprintId: null };
+    for (const task of pendingTasks) {
+      const blocked = sprintAcceptsBacklogItem(candidateSprint, task);
+      if (blocked) return res.status(409).json({ error: blocked });
+    }
+    createdSprint = await sprintStore.create({
+      ownerId: userId(req), name, goal, startDate, endDate, boardId: boardId(board)
+    });
+    const sprintTasks = [];
+    for (const task of pendingTasks) {
+      const updated = await store.update(task.key, { sprintId: sprintId(createdSprint), status: SPRINT_ENTRY_STATUS });
+      if (!updated) throw new Error(`Task ${task.key} could not be added to the sprint.`);
+      movedTasks.push({ key: task.key, status: task.status });
+      sprintTasks.push(updated);
+    }
+    dispatchAutomation(boardId(board), 'sprintKickoffBroadcast', async () => {
+      const recipients = new Set((board.memberIds || []).map(String));
+      recipients.add(String(board.ownerId));
+      for (const recipient of recipients) {
+        await notifySafely({
+          recipient,
+          sender: userId(req),
+          type: 'sprint_started',
+          title: `Sprint started: ${createdSprint.name}`,
+          message: `${createdSprint.goal ? `Goal: ${createdSprint.goal}. ` : ''}Timeline: ${createdSprint.startDate} to ${createdSprint.endDate}.`,
+          relatedId: sprintId(createdSprint),
+          metadata: { boardId: boardId(board), sprintId: sprintId(createdSprint), startDate: createdSprint.startDate, endDate: createdSprint.endDate }
+        });
+      }
+    });
+    res.status(201).json(sprintView(createdSprint, sprintTasks));
+  } catch (error) {
+    for (const task of movedTasks) await store.update(task.key, { sprintId: null, status: task.status }).catch(() => {});
+    if (createdSprint) await sprintStore.remove(sprintId(createdSprint), userId(req)).catch(() => {});
+    next(error);
+  }
 });
 app.get('/api/sprints/:id', requireAuth, async (req, res, next) => {
   try {
     const sprint = await authorizedSprint(req, res);
     if (!sprint) return;
-    res.json(sprintView(sprint, await store.listBySprint(sprintId(sprint))));
+    res.json(sprintView(sprint, await store.listBySprint(sprintId(sprint), sprint.boardId)));
   } catch (error) { next(error); }
 });
 app.patch('/api/sprints/:id', requireAuth, async (req, res, next) => {
@@ -896,14 +1334,14 @@ app.patch('/api/sprints/:id', requireAuth, async (req, res, next) => {
     if (!dateValidation.ok) return res.status(400).json({ error: dateValidation.error });
     updates.startDate = startDate; updates.endDate = endDate;
     const updated = await sprintStore.update(sprintId(sprint), userId(req), updates);
-    res.json(sprintView(updated, await store.listBySprint(sprintId(updated))));
+    res.json(sprintView(updated, await store.listBySprint(sprintId(updated), updated.boardId)));
   } catch (error) { next(error); }
 });
 app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
   try {
     const sprint = await authorizedSprint(req, res);
     if (!sprint) return;
-    const tasks = await store.listBySprint(sprintId(sprint));
+    const tasks = await store.listBySprint(sprintId(sprint), sprint.boardId);
     res.json((await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean));
   } catch (error) { next(error); }
 });
@@ -911,7 +1349,9 @@ app.get('/api/backlog', requireAuth, async (req, res, next) => {
   try {
     // Sprints are owner-scoped, so an owner-scoped query is what keeps the Product
     // Backlog consistent with the sprint list (and avoids loading other developers' rows).
-    const tasks = await store.listWithoutSprint(userId(req));
+    const requestedBoardId = req.query.boardId ? String(req.query.boardId) : null;
+    if (requestedBoardId && !await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
+    const tasks = await store.listWithoutSprint(userId(req), requestedBoardId);
     const accessible = (await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean);
     res.json(sortBacklog(accessible));
   } catch (error) { next(error); }
@@ -952,6 +1392,27 @@ app.get('/api/tasks', requireAuth, async (req, res, next) => {
     res.json((await Promise.all(tasks.map(async (task) => String(task.boardId || '') === boardId(board) && (await canAccess(task, req)) ? task : null))).filter(Boolean));
   } catch (error) { next(error); }
 });
+app.get('/api/tasks/:key/history', requireAuth, async (req, res, next) => {
+  try {
+    const task = await authorizedTask(req, res);
+    if (!task) return;
+    const history = mongoReady && task._id
+      ? await TaskHistory.find({ taskId: task._id }).sort({ at: 1 }).lean()
+      : memoryAutomationHistory.filter((entry) => entry.taskKey === String(task.key)).sort((a, b) => new Date(a.at) - new Date(b.at));
+    res.json(history.map((entry) => ({
+      id: String(entry._id || entry.id),
+      taskId: String(entry.taskId || task._id || ''),
+      taskKey: String(task.key),
+      teamId: entry.teamId ? String(entry.teamId) : null,
+      from: entry.from ?? null,
+      to: entry.to,
+      actorId: String(entry.actorId || ''),
+      source: entry.source || 'status_change',
+      note: entry.note || '',
+      at: entry.at
+    })));
+  } catch (error) { next(error); }
+});
 app.post('/api/tasks', requireAuth, async (req, res, next) => {
   try {
     validateTaskInput(req.body || {});
@@ -966,13 +1427,37 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
     }
     let key;
     do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+    const members = await boardMembers(board);
+    const requestedAssignee = String(req.body.assignee || 'Unassigned').trim();
+    let assigneeMember = req.body.assigneeId
+      ? members.find((member) => String(member.id) === String(req.body.assigneeId))
+      : members.find((member) => member.name.toLowerCase() === requestedAssignee.toLowerCase()
+        || member.email.toLowerCase() === requestedAssignee.toLowerCase());
+    if (req.body.assigneeId && !assigneeMember) return res.status(400).json({ error: 'Assignee must be a member of this board.' });
+    const assigneeName = assigneeMember?.name
+      || (requestedAssignee.toLowerCase() === 'unassigned' ? 'Unassigned' : requestedAssignee);
     const task = await store.create({
       key, ownerId: userId(req), boardId: boardId(board), title: req.body.title.trim(), description: (req.body.description || '').slice(0, 4000),
       status: sprint ? SPRINT_ENTRY_STATUS : req.body.status || BACKLOG_STATUS, priority: req.body.priority || 'medium',
-      labels: [...new Set(req.body.labels || [])], assignee: String(req.body.assignee || 'Unassigned').slice(0, 120),
+      labels: [...new Set(req.body.labels || [])], assignee: assigneeName,
+      assigneeId: assigneeMember?.id || null,
       dueDate: String(req.body.dueDate || '').slice(0, 40), sprintId: sprint ? sprintId(sprint) : null, storyPoints: req.body.storyPoints || 0,
-      comments: [], attachments: [], dependencies: []
+      comments: [], attachments: [], dependencies: [],
+      checklist: (req.body.checklist || []).map((item) => ({ text: item.text.trim(), completed: Boolean(item.completed) }))
     });
+    const taskAssigneeId = task.assigneeId || (assigneeMember?.id ?? null);
+    if (taskAssigneeId && taskAssigneeId !== userId(req)) {
+      dispatchAutomation(boardId(board), 'taskAssignmentNotification', () => notifySafely({
+        recipient: taskAssigneeId,
+        sender: userId(req),
+        type: 'task_assigned',
+        title: 'Task assigned to you',
+        message: `${task.key}: ${task.title}`,
+        relatedId: task._id || task.key,
+        metadata: { boardId: boardId(board), taskKey: task.key }
+      }));
+    }
+    dispatchAutomation(boardId(board), 'overduePriorityEscalation', () => escalateOverdueTask(task, board));
     res.status(201).json(task);
   } catch (error) { next(error); }
 });
@@ -996,7 +1481,85 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (updates.title !== undefined) updates.title = updates.title.trim();
     if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
     if (updates.labels) updates.labels = [...new Set(updates.labels)];
-    res.json(await store.update(task.key, updates));
+    if (req.body.assignee !== undefined || req.body.assigneeId !== undefined) {
+      const board = task.boardId ? await boardStore.find(task.boardId) : null;
+      const members = board ? await boardMembers(board) : [];
+      const requestedAssigneeId = req.body.assigneeId;
+      const requestedAssignee = String(req.body.assignee ?? task.assignee ?? 'Unassigned').trim();
+      if (requestedAssigneeId === null && req.body.assignee === undefined) {
+        updates.assignee = 'Unassigned';
+        updates.assigneeId = null;
+      } else {
+        let assigneeMember = requestedAssigneeId
+          ? members.find((member) => String(member.id) === String(requestedAssigneeId))
+          : members.find((member) => member.name.toLowerCase() === requestedAssignee.toLowerCase()
+            || member.email.toLowerCase() === requestedAssignee.toLowerCase());
+        if (requestedAssigneeId && !assigneeMember) return res.status(400).json({ error: 'Assignee must be a member of this board.' });
+        updates.assignee = assigneeMember?.name
+          || (requestedAssignee.toLowerCase() === 'unassigned' ? 'Unassigned' : requestedAssignee);
+        updates.assigneeId = assigneeMember?.id || null;
+      }
+    }
+    if (updates.checklist) {
+      updates.checklist = updates.checklist.map((item) => ({ text: item.text.trim(), completed: Boolean(item.completed) }));
+    }
+    let updatedTask = await store.update(task.key, updates);
+    if (!updatedTask) return res.status(404).json({ error: 'Task not found.' });
+    const board = updatedTask.boardId ? await boardStore.find(updatedTask.boardId) : null;
+    if (board && updates.checklist?.length && updates.checklist.every((item) => item.completed)
+      && task.status !== 'done'
+      && (!task.sprintId || isPermittedSprintStatusChange(task.status, 'done'))) {
+      const completed = await dispatchAutomation(boardId(board), 'autoCompleteSubtasks', async () => {
+        const result = await store.update(task.key, { status: 'done' });
+        if (result) {
+          try {
+            await writeAutomationHistory({
+              task: result,
+              actorId: userId(req),
+              from: task.status,
+              to: 'done',
+              note: 'Task was automatically completed because every checklist item was checked off.',
+            });
+          } catch (historyError) {
+            console.error(`[automation] could not write completion audit note for ${task.key}:`, historyError);
+          }
+        }
+        return result;
+      });
+      if (completed) updatedTask = completed;
+    }
+    if (board && String(updatedTask.assigneeId || '') !== String(task.assigneeId || '')
+      && updatedTask.assigneeId && String(updatedTask.assigneeId) !== userId(req)) {
+      dispatchAutomation(boardId(board), 'taskAssignmentNotification', () => notifySafely({
+        recipient: updatedTask.assigneeId,
+        sender: userId(req),
+        type: 'task_assigned',
+        title: 'Task assigned to you',
+        message: `${updatedTask.key}: ${updatedTask.title}`,
+        relatedId: updatedTask._id || updatedTask.key,
+        metadata: { boardId: boardId(board), taskKey: updatedTask.key }
+      }));
+    }
+    if (board && task.status !== 'review' && updatedTask.status === 'review') {
+      dispatchAutomation(boardId(board), 'taskReviewAlert', async () => {
+        const recipients = new Set([String(board.ownerId), String(updatedTask.ownerId || '')]);
+        recipients.delete(userId(req));
+        for (const recipient of recipients) {
+          if (!recipient) continue;
+          await notifySafely({
+            recipient,
+            sender: userId(req),
+            type: 'task_review',
+            title: 'Task ready for review',
+            message: `${updatedTask.key}: ${updatedTask.title} moved to In Review / QA.`,
+            relatedId: updatedTask._id || updatedTask.key,
+            metadata: { boardId: boardId(board), taskKey: updatedTask.key, status: 'review' }
+          });
+        }
+      });
+    }
+    if (board) dispatchAutomation(boardId(board), 'overduePriorityEscalation', () => escalateOverdueTask(updatedTask, board));
+    res.json(updatedTask);
   } catch (error) { next(error); }
 });
 app.delete('/api/tasks/:key', requireAuth, async (req, res, next) => {
@@ -1194,7 +1757,8 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
           assignee: item.assignee,
           dueDate: item.dueDate || '',
           sprintId: null,
-          storyPoints: 0,
+          storyPoints: item.storyPoints,
+          aiSuggested: true,
           comments: [],
           attachments: [],
           dependencies: []
@@ -1301,7 +1865,8 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
           assignee: task.assignee || 'Unassigned',
           dueDate: String(task.dueDate || '').slice(0, 40),
           sprintId: null,
-          storyPoints: Number.isInteger(task.storyPoints) ? task.storyPoints : 0,
+          storyPoints: aiStoryPoints(task.storyPoints, task),
+          aiSuggested: true,
           comments: [],
           attachments: [],
           dependencies: []
@@ -1329,6 +1894,97 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/api/ai/sprints', requireAuth, async (req, res, next) => {
+  let createdSprint = null;
+  const createdTaskKeys = [];
+  try {
+    const goal = typeof req.body?.goal === 'string' ? req.body.goal.trim() : '';
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (goal.length < 10 || goal.length > 2000) {
+      return res.status(400).json({ error: 'Sprint brief must be between 10 and 2000 characters.' });
+    }
+    if (name.length > 120) return res.status(400).json({ error: 'Sprint name must be 120 characters or fewer.' });
+    if (!getEffective('OPENROUTER_API_KEY')?.trim()) {
+      return res.status(503).json({
+        error: 'AI sprint generation is not configured. Add your OpenRouter API key in Settings or backend/.env, or create the sprint manually.',
+        code: 'AI_NOT_CONFIGURED'
+      });
+    }
+
+    if (!req.body?.boardId) return res.status(400).json({ error: 'Select a board before generating a sprint.' });
+    const board = await authorizedBoard({ ...req, params: { id: String(req.body.boardId) } }, res);
+    if (!board) return;
+
+    const members = await boardMembers(board);
+    const planMessage = `Plan a prioritized 14-day engineering sprint${name ? ` named "${name}"` : ''} for this goal: ${goal}. `
+      + 'Return a concise sprintGoal summarizing the milestone. Create up to 20 implementation-sized sprint tasks, each with a concrete description, risk-based priority, labels, and an estimated Fibonacci storyPoints integer (1, 2, 3, 5, 8, or 13). '
+      + 'Put every task in To Do. Assign each task only to a listed team member whose skills match the task; otherwise leave it Unassigned. '
+      + 'Return a create_many action with sprintGoal, not a conversational answer.';
+    const result = await chatWithContext(planMessage, [], BOARD_COLUMNS, members);
+    const plannedTasks = tasksFromAiResult(result);
+    if (!plannedTasks.length) {
+      return res.status(422).json({
+        error: 'The AI planner could not create a sprint plan. Refine the brief or create the sprint manually.',
+        code: 'AI_NO_PLAN'
+      });
+    }
+    for (const task of plannedTasks) validateTaskInput(task, false);
+
+    const startDate = todayIsoDate();
+    const endDate = endDateForStart(startDate);
+    createdSprint = await sprintStore.create({
+      ownerId: userId(req),
+      name: name || `${board.name} Sprint`,
+      goal: result.action.sprintGoal || goal,
+      startDate,
+      endDate,
+      boardId: boardId(board)
+    });
+
+    const createdTasks = [];
+    for (const task of plannedTasks) {
+      let assignee = String(task.assignee || 'Unassigned').trim();
+      if (!assignee || assignee.toLowerCase() === 'unassigned') {
+        const skilled = findBestSkilledMember(task, members);
+        const fallback = skilled || pickRandomMember(members);
+        assignee = fallback?.name || 'Unassigned';
+      } else {
+        assignee = resolveBoardAssignee(assignee, members);
+      }
+      let key;
+      do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+      const created = await store.create({
+        key,
+        ownerId: userId(req),
+        boardId: boardId(board),
+        title: task.title.trim(),
+        description: task.description || '',
+        status: SPRINT_ENTRY_STATUS,
+        priority: task.priority,
+        labels: [...new Set(task.labels || [])],
+        assignee,
+        dueDate: task.dueDate || '',
+        sprintId: sprintId(createdSprint),
+        storyPoints: aiStoryPoints(task.storyPoints, task),
+        aiSuggested: true,
+        comments: [],
+        attachments: [],
+        dependencies: []
+      });
+      createdTaskKeys.push(key);
+      createdTasks.push(created);
+    }
+    res.status(201).json({
+      sprint: sprintView(createdSprint, createdTasks),
+      tasksCreated: createdTasks.length
+    });
+  } catch (error) {
+    for (const key of createdTaskKeys) await store.remove(key).catch(() => {});
+    if (createdSprint) await sprintStore.remove(sprintId(createdSprint), userId(req)).catch(() => {});
+    next(error);
+  }
+});
+
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Attachment is invalid or too large.' });
   if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Request body is too large.' });
@@ -1343,9 +1999,15 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 export { app, connectMongo, memoryTasks, sessions };
-connectMongo()
-  .then(() => app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`)))
+export const serverStarted = connectMongo()
+  .then(() => {
+    void scanOverdueTasks();
+    const overdueScan = setInterval(() => { void scanOverdueTasks(); }, 60_000);
+    overdueScan.unref();
+    return app.listen(port, () => console.log(`LeadAI API listening on http://localhost:${port}`));
+  })
   .catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
+    return null;
   });

@@ -31,7 +31,7 @@ export function planningMessage(goal, name) {
   const label = name ? ` named "${name}"` : '';
   return `Create a focused, implementation-ready project backlog${label} for this goal: ${goal}. `
     + 'Put every task in the Backlog column, give it a concrete description, a risk-based priority, '
-    + 'and an ISO date-only due date (YYYY-MM-DD). Do not assign the work to a sprint. '
+    + 'a Fibonacci story-point estimate (1, 2, 3, 5, 8, or 13), and an ISO date-only due date (YYYY-MM-DD). Do not assign the work to a sprint. '
     + 'Leave every task Unassigned; the owner will assign work on the board.';
 }
 

@@ -5,11 +5,16 @@
 // live in memory only and are lost on server restart, at which point .env
 // applies again -- which is exactly the intended "backup" behaviour.
 const overrides = Object.create(null);
+let setupComplete = false;
 
 const MANAGED_KEYS = ['MONGODB_URI', 'OPENROUTER_API_KEY', 'OPENROUTER_MODEL'];
 
 export function getEffective(key) {
   return overrides[key] ?? process.env[key] ?? '';
+}
+
+export function getOverride(key) {
+  return overrides[key];
 }
 
 export function setOverride(key, value) {
@@ -26,6 +31,14 @@ export function removeOverride(key) {
 
 export function clearOverrides() {
   for (const key of MANAGED_KEYS) delete overrides[key];
+}
+
+export function markSetupComplete(value = true) {
+  setupComplete = Boolean(value);
+}
+
+export function isSetupComplete() {
+  return setupComplete;
 }
 
 export function getAllEffective() {

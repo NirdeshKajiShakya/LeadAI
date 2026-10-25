@@ -3,12 +3,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { todayIsoDate } from './sprintDates.js';
 
 const PORT = process.env.TEST_PORT || 4100;
 const BASE = `http://127.0.0.1:${PORT}/api`;
 
 const server = spawn(process.execPath, ['server/index.js'], {
-  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1' },
+  env: { ...process.env, PORT: String(PORT), MONGODB_URI: '', ALLOW_MEMORY_DB: '1', OPENROUTER_API_KEY: '' },
   stdio: 'ignore'
 });
 
@@ -46,22 +47,40 @@ try {
   await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Sprint Tester', email, password: 'Password123!' }) });
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   globalThis.authToken = signedIn.body.token;
+  const { body: boards } = await api('/boards');
+  const boardId = boards[0].id;
 
-  const { body: sprints } = await api('/sprints');
-  check('seeded sprint exists with a string id', () => {
-    assert.equal(sprints.length, 1);
-    assert.equal(typeof sprints[0].id, 'string');
-    assert.notEqual(sprints[0].id, '[object Object]');
+  const { body: noSprints } = await api('/sprints');
+  check('reading the sprint list does not create placeholder sprints', () => assert.deepEqual(noSprints, []));
+  const unavailableAi = await api('/ai/sprints', {
+    method: 'POST',
+    body: JSON.stringify({ goal: 'Plan a sprint for backend refactoring' })
   });
-  check('sprint runs 14 calendar days', () => assert.equal(sprints[0].durationDays, 14));
-  check('sprint day is computed, not hardcoded', () => {
-    assert.equal(sprints[0].current.total, 14);
-    assert.ok(sprints[0].current.day >= 1 && sprints[0].current.day <= 14);
-    assert.equal(sprints[0].current.state, 'active');
+  check('AI sprint generation reports a missing provider without creating a sprint', () => {
+    assert.equal(unavailableAi.status, 503);
+    assert.equal(unavailableAi.body.code, 'AI_NOT_CONFIGURED');
   });
-  check('sprint exposes a persisted goal', () => assert.ok(sprints[0].goal.length > 0));
+  const { body: stillEmpty } = await api('/sprints');
+  check('the failed AI generation leaves the sprint list empty', () => assert.deepEqual(stillEmpty, []));
 
-  const sprintId = sprints[0].id;
+  const createdActive = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Sprint 1', goal: 'Ship the first product increment', startDate: todayIsoDate(), boardId })
+  });
+  check('a sprint can be created explicitly with a string id', () => {
+    assert.equal(createdActive.status, 201);
+    assert.equal(typeof createdActive.body.id, 'string');
+    assert.notEqual(createdActive.body.id, '[object Object]');
+  });
+  check('created sprint runs 14 calendar days', () => assert.equal(createdActive.body.durationDays, 14));
+  check('sprint day is computed from persisted dates', () => {
+    assert.equal(createdActive.body.current.total, 14);
+    assert.equal(createdActive.body.current.day, 1);
+    assert.equal(createdActive.body.current.state, 'active');
+  });
+  check('sprint exposes a persisted goal', () => assert.equal(createdActive.body.goal, 'Ship the first product increment'));
+
+  const sprintId = createdActive.body.id;
   const { body: backlogBefore } = await api('/backlog');
   const { body: sprintTasksBefore } = await api(`/sprints/${sprintId}/tasks`);
   check('every task is in exactly one backlog list', () => {
@@ -87,7 +106,15 @@ try {
   });
 
   // A sprint task advances one validated stage at a time: To Do -> In Progress -> Review -> Done.
-  await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ storyPoints: 5, status: 'progress' }) });
+  const estimated = await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ storyPoints: 5, status: 'progress' }) });
+  const liveProgress = await api(`/sprints/${sprintId}`);
+  check('editing story points immediately updates sprint commitment metrics', () => {
+    assert.equal(estimated.body.storyPoints, 5);
+    assert.equal(liveProgress.body.progress.totalStoryPoints, 5);
+    assert.equal(liveProgress.body.progress.completedStoryPoints, 0);
+    assert.equal(liveProgress.body.progress.remainingStoryPoints, 5);
+    assert.equal(liveProgress.body.progress.progressPercent, 0);
+  });
   await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ status: 'review' }) });
   await api(`/tasks/${task.key}`, { method: 'PATCH', body: JSON.stringify({ status: 'done' }) });
   const { body: afterDone } = await api(`/sprints/${sprintId}`);
@@ -113,7 +140,7 @@ try {
   const { body: afterRemove } = await api(`/sprints/${sprintId}`);
   check('progress reflects the completed work that stayed in the sprint', () => assert.equal(afterRemove.progress.progressPercent, 100));
 
-  const created = await api('/sprints', { method: 'POST', body: JSON.stringify({ name: 'Sprint 15', goal: 'Lifecycle', startDate: '2026-11-02' }) });
+  const created = await api('/sprints', { method: 'POST', body: JSON.stringify({ name: 'Sprint 15', goal: 'Lifecycle', startDate: '2026-11-02', boardId }) });
   check('creating a sprint derives a 14-day range', () => {
     assert.equal(created.status, 201);
     assert.equal(created.body.startDate, '2026-11-02');
@@ -131,12 +158,47 @@ try {
 
   const renamed = await api(`/sprints/${created.body.id}`, { method: 'PATCH', body: JSON.stringify({ name: 'Sprint 15 Renamed' }) });
   check('sprint name is editable', () => assert.equal(renamed.body.name, 'Sprint 15 Renamed'));
+  const customRange = await api(`/sprints/${created.body.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ startDate: '2026-11-02', endDate: '2026-11-08' })
+  });
+  check('sprint dates can be edited to a custom valid range', () => {
+    assert.equal(customRange.status, 200);
+    assert.equal(customRange.body.durationDays, 7);
+    assert.equal(customRange.body.current.total, 7);
+  });
 
-  const { body: both } = await api('/sprints');
+  const { body: both } = await api(`/sprints?boardId=${encodeURIComponent(boardId)}`);
   check('multiple sprints are selectable', () => assert.equal(both.length, 2));
 
+  const secondBoard = await api('/boards', { method: 'POST', body: JSON.stringify({ name: 'Second Project' }) });
+  const otherBoardTask = await api('/tasks', {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Task on first board', boardId, status: 'backlog' })
+  });
+  const secondBoardSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Second Board Sprint', startDate: todayIsoDate(), boardId: secondBoard.body.id })
+  });
+  const { body: secondBoardSprints } = await api(`/sprints?boardId=${encodeURIComponent(secondBoard.body.id)}`);
+  check('sprint selector data is isolated to the requested board', () => {
+    assert.equal(secondBoardSprint.status, 201);
+    assert.deepEqual(secondBoardSprints.map((sprint) => sprint.id), [secondBoardSprint.body.id]);
+  });
+  const wrongBoardMove = await api(`/sprints/${secondBoardSprint.body.id}/tasks?boardId=${encodeURIComponent(secondBoard.body.id)}`, {
+    method: 'POST',
+    body: JSON.stringify({ key: otherBoardTask.body.key })
+  });
+  check('tasks cannot be moved into another board sprint', () => assert.equal(wrongBoardMove.status, 409));
+  const { body: secondBoardBacklog } = await api(`/backlog?boardId=${encodeURIComponent(secondBoard.body.id)}`);
+  check('product backlog data is isolated to the requested board', () => assert.deepEqual(secondBoardBacklog, []));
+  const missingBoardSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Unscoped Sprint', startDate: todayIsoDate() })
+  });
+  check('sprint creation requires an explicit board', () => assert.equal(missingBoardSprint.status, 400));
+
   const rejections = [
-    ['13-day range', '/sprints', { name: 'X', startDate: '2026-10-01', endDate: '2026-10-13' }],
     ['end before start', '/sprints', { name: 'X', startDate: '2026-10-05', endDate: '2026-10-01' }],
     ['invalid date', '/sprints', { name: 'X', startDate: '2026-02-30' }],
     ['missing name', '/sprints', { startDate: '2026-10-01' }]
@@ -148,14 +210,14 @@ try {
 
   const { status: missingSprint } = await api('/sprints/does-not-exist');
   check('rejects unknown sprint id', () => assert.equal(missingSprint, 404));
-  const { status: missingTask } = await api(`/sprints/${sprintId}/tasks`, { method: 'POST', body: JSON.stringify({ key: 'KAN-999' }) });
+  const { status: missingTask } = await api(`/sprints/${sprintId}/tasks`, { method: 'POST', body: JSON.stringify({ key: `KAN-MISSING-${Date.now()}` }) });
   check('rejects unknown task key', () => assert.equal(missingTask, 404));
 
   const { body: emptySprint } = await api(`/sprints/${created.body.id}`);
   check('empty sprint reports 0% without dividing by zero', () => assert.equal(emptySprint.progress.progressPercent, 0));
 
   const { body: boardTasks } = await api('/tasks');
-  check('existing board endpoint still returns all tasks', () => assert.equal(boardTasks.length, 5));
+  check('existing board endpoint still returns all tasks', () => assert.equal(boardTasks.length, 6));
 
   console.log(`\n${passed} API checks passed.`);
 } finally {

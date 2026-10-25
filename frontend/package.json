@@ -8,6 +8,7 @@
     "client": "vite --host 0.0.0.0",
     "backend": "npm --prefix ../backend run dev",
     "build": "vite build",
+    "test:format": "node src/formatDate.test.js",
     "start": "node server/index.js"
   },
   "dependencies": {

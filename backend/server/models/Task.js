@@ -22,6 +22,11 @@ const dependencySchema = new mongoose.Schema({
   toTask: { type: String, required: true }
 }, { _id: true });
 
+const checklistItemSchema = new mongoose.Schema({
+  text: { type: String, required: true, trim: true, maxlength: 240 },
+  completed: { type: Boolean, default: false }
+}, { _id: true });
+
 const taskSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true, index: true },
   ownerId: { type: String, default: null, index: true },
@@ -47,11 +52,17 @@ const taskSchema = new mongoose.Schema({
   completedAt: { type: Date, default: null },
   comments: { type: [commentSchema], default: [] },
   attachments: { type: [attachmentSchema], default: [] },
-  dependencies: { type: [dependencySchema], default: [] }
+  dependencies: { type: [dependencySchema], default: [] },
+  checklist: { type: [checklistItemSchema], default: [] },
+  automationFlags: {
+    overdueEscalated: { type: Boolean, default: false },
+    overdueNotifiedAt: { type: Date, default: null }
+  }
 }, { timestamps: true });
 
 // Shared databases serve every developer, so the board and sprint queries must hit indexes.
 taskSchema.index({ ownerId: 1, createdAt: 1 });
 taskSchema.index({ sprintId: 1 });
+taskSchema.index({ status: 1, dueDate: 1 });
 
 export const Task = mongoose.model('Task', taskSchema);

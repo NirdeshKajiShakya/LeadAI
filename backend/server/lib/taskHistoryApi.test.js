@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { todayIsoDate } from './sprintDates.js';
 
 const PORT = process.env.TEST_PORT || 4101;
 const BASE = `http://127.0.0.1:${PORT}/api`;
@@ -149,8 +150,10 @@ try {
   });
 
   // ---- J1: team-wide history ----------------------------------------------
-  const { body: sprints } = await api('/sprints');
-  const sprintId = sprints[0].id;
+  const createdSprint = await api('/sprints', { method: 'POST', body: JSON.stringify({
+    name: 'History Sprint', startDate: todayIsoDate(), boardId: created.body.boardId
+  }) });
+  const sprintId = createdSprint.body.id;
   const moved = await api(`/sprints/${sprintId}/tasks`, { method: 'POST', body: JSON.stringify({ key }) });
   check('moving the task into the sprint returns 201', () => assert.equal(moved.status, 201));
 

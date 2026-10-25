@@ -47,7 +47,10 @@ export function sprintAcceptsBacklogItem(sprint, task) {
   if (String(task.ownerId ?? '') !== String(sprint.ownerId ?? '')) {
     return 'This task belongs to a different project.';
   }
-  if (sprint.boardId && task.boardId && String(sprint.boardId) !== String(task.boardId)) {
+  if (!sprint.boardId) {
+    return 'This sprint is not assigned to a board.';
+  }
+  if (String(sprint.boardId) !== String(task.boardId || '')) {
     return 'This sprint belongs to a different project.';
   }
   if (sprintState(sprint.startDate, sprint.endDate) !== 'active') {

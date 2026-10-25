@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { getEffective } from './lib/envConfig.js';
+import { aiStoryPoints, estimateStoryPoints } from './lib/storyPoints.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_TASKS = 100;
@@ -28,7 +29,7 @@ function plannedTask(category, index) {
       ? ['Set up the server foundation', 'Implement the core API endpoints', 'Add validation and error handling']
       : ['Define the work scope', 'Implement the main solution', 'Review and test the result'];
   const title = templates[(index - 1) % templates.length];
-  return {
+  const task = {
     title: `${title}${index > templates.length ? ` ${index}` : ''}`,
     description: `Complete the ${category} work for the project described by the user. Include the relevant implementation, verify it works, and leave the work ready for review.`,
     status: 'backlog',
@@ -37,17 +38,88 @@ function plannedTask(category, index) {
     assignee: 'Unassigned',
     dueDate: isoDateAfter(index * 2)
   };
+  task.storyPoints = estimateStoryPoints(task);
+  return task;
 }
 
-function projectPlanTasks(message) {
+function ecommercePlanTasks() {
+  const tasks = [
+    {
+      title: 'Define the product catalog and category structure',
+      description: 'Agree on product attributes, categories, variants, pricing, and catalog ownership before implementation.',
+      labels: ['backend', 'catalog']
+    },
+    {
+      title: 'Build product listings with search and filters',
+      description: 'Create responsive product listing pages with category navigation, sorting, search, and filter states.',
+      labels: ['frontend', 'catalog']
+    },
+    {
+      title: 'Build product detail pages and variant selection',
+      description: 'Show product information, images, pricing, availability, and selectable variants with accessible interactions.',
+      labels: ['frontend', 'catalog']
+    },
+    {
+      title: 'Implement the shopping cart and quantity updates',
+      description: 'Support adding and removing products, changing quantities, recalculating totals, and persisting the cart.',
+      labels: ['frontend', 'cart']
+    },
+    {
+      title: 'Create checkout forms with address validation',
+      description: 'Collect customer and delivery details, validate inputs, and handle incomplete or invalid checkout data.',
+      labels: ['frontend', 'checkout']
+    },
+    {
+      title: 'Integrate payment processing and secure callbacks',
+      description: 'Connect the chosen payment provider, verify callbacks server-side, and handle approved, declined, and pending payments.',
+      labels: ['backend', 'payments']
+    },
+    {
+      title: 'Add order creation and confirmation notifications',
+      description: 'Persist paid orders, prevent duplicate submissions, and show customers a clear confirmation and order reference.',
+      labels: ['backend', 'orders']
+    },
+    {
+      title: 'Build customer sign-in and order history',
+      description: 'Implement secure customer authentication and a private order history view with appropriate access checks.',
+      labels: ['backend', 'authentication']
+    },
+    {
+      title: 'Add inventory and order management APIs',
+      description: 'Create validated APIs for stock checks, inventory adjustments, and order status updates.',
+      labels: ['backend', 'api']
+    },
+    {
+      title: 'Test the purchase flow from browsing through fulfillment',
+      description: 'Cover catalog, cart, checkout, payment outcomes, order confirmation, and failure recovery with automated tests.',
+      labels: ['testing', 'e-commerce']
+    }
+  ];
+  return tasks.map((task, index) => ({
+    ...plannedTask(task.labels[0], index + 1),
+    ...task,
+    status: 'backlog',
+    priority: PRIORITY_ORDER[index % PRIORITY_ORDER.length],
+    assignee: 'Unassigned',
+    dueDate: isoDateAfter((index + 1) * 2),
+    storyPoints: estimateStoryPoints(task)
+  }));
+}
+
+function projectPlanTasks(message, count) {
   const lowerMessage = message.toLowerCase();
   const isHotel = /\bhotel\b/.test(lowerMessage);
-  const isWebsite = /\b(site|website|web app|web application)\b/.test(lowerMessage);
+  const isEcommerce = /\b(e-?commerce|online (?:shop|store)|shopping cart)\b/.test(lowerMessage);
+  const isWebsite = /\b(site|website|web app(?:lication)?)\b/.test(lowerMessage);
+  if (isEcommerce) {
+    const tasks = ecommercePlanTasks();
+    return count ? tasks.slice(0, count) : tasks.slice(0, 7);
+  }
   if (!isHotel && !isWebsite) return null;
   const categories = isHotel
     ? ['Discovery and content', 'Homepage and branding', 'Room listings and booking flow', 'Contact and location', 'Responsive frontend', 'Accessibility and SEO', 'Testing and launch']
     : ['Project discovery', 'Information architecture', 'Core page layout', 'Frontend implementation', 'Responsive behavior', 'Accessibility and SEO', 'Testing and launch'];
-  return categories.map((category, index) => {
+  const baseTasks = categories.map((category, index) => {
     const task = plannedTask(category, index + 1);
     return {
       ...task,
@@ -71,6 +143,16 @@ function projectPlanTasks(message) {
           'Run the main user flows, fix release-blocking issues, and document the steps needed to deploy the website.'
         ][index]
         : task.description
+    };
+  });
+  if (!count) return baseTasks;
+  return Array.from({ length: count }, (_, index) => {
+    const task = baseTasks[index % baseTasks.length];
+    if (index < baseTasks.length) return task;
+    return {
+      ...task,
+      title: `${task.title} ${Math.floor(index / baseTasks.length) + 1}`,
+      dueDate: isoDateAfter((index + 1) * 2)
     };
   });
 }
@@ -117,9 +199,9 @@ function fallbackReply(message, tasks, columns, members = []) {
   const columnMap = Object.fromEntries(columns.map((column) => [column.id, column.label]));
   const lowerMessage = message.toLowerCase();
   const projectTasks = projectPlanTasks(message);
-  const planningRequest = /\b(create|make|add|generate|build|plan|bunch|tasks?|backlog)\b/i.test(message)
-    && /\b(website|site|web app|hotel|project)\b/i.test(message)
-    && !/\b\d+\s+tasks?\b/i.test(message);
+  const planningRequest = /\b(create|make|add|generate|build|plan)\b/i.test(message)
+    && (projectTasks || /\bproject\b/i.test(message))
+    && !/\b(?:(?:about|around|approximately|roughly)\s+)?\d+\s+(?:new\s+)?tasks?\b/i.test(message);
   if (planningRequest && projectTasks) {
     return {
       reply: `I’m ready to create ${projectTasks.length} planned backlog tasks with descriptions, priorities, and delivery dates.`,
@@ -134,10 +216,17 @@ function fallbackReply(message, tasks, columns, members = []) {
     const title = createMatch[1].trim().replace(/["']$/, '');
     return { reply: `I’m ready to create “${title}” in the ${columnMap[status]} column.`, matchedTask: null, action: { type: 'create', ...plannedTask(title, 1), title, status } };
   }
-  const batchMatch = message.match(/\b(?:create|add|make)\s+(\d+)\s+tasks?\b/i);
+  const batchMatch = message.match(/\b(?:create|add|make|generate)\s+(?:(?:about|around|approximately|roughly)\s+)?(\d+)\s+(?:new\s+)?tasks?\b/i)
+    || (/\b(?:create|add|make|generate)\b/i.test(message) && /\b(?:some|several|multiple|a few|a bunch of)\s+(?:new\s+)?tasks?\b/i.test(message)
+      ? [message, '5']
+      : null);
   if (batchMatch) {
     const count = Math.min(Number(batchMatch[1]), 20);
     if (count > 0) {
+      if (projectTasks && !/\d+\s+for\s+/i.test(message)) {
+        const items = projectPlanTasks(message, count);
+        return { reply: `I’m ready to create ${items.length} planned backlog tasks.`, matchedTask: null, action: { type: 'create_many', tasks: items } };
+      }
       const categories = [...message.matchAll(/(\d+)\s+for\s+([a-z][\w -]*?)(?=\s+and\s+\d+\s+for|\s*$)/gi)]
         .map((match) => ({ count: Math.min(Number(match[1]), count), name: match[2].trim() }));
       const groups = categories.length ? categories : [{ count, name: 'General' }];
@@ -221,10 +310,11 @@ Safety and privacy:
 Return ONLY valid JSON with this shape:
 {"reply":"helpful concise response","matchedTaskKey":null,"action":null}
 Action must be null, or exactly one of:
-{"type":"create","title":"...","description":"...","status":"backlog","priority":"medium","labels":[],"assignee":"Unassigned","dueDate":"2026-10-20"}
-{"type":"create_many","tasks":[{"title":"...","description":"...","status":"backlog","priority":"high","labels":[],"assignee":"Unassigned","dueDate":"2026-10-20"}]}
-{"type":"update","key":"KAN-123","changes":{"status":"done","title":"...","description":"...","priority":"high","labels":[],"assignee":"...","dueDate":"..."}}
+{"type":"create","title":"...","description":"...","status":"backlog","priority":"medium","labels":[],"assignee":"Unassigned","dueDate":"2026-10-20","storyPoints":3}
+{"type":"create_many","sprintGoal":"clear sprint milestone outcome","tasks":[{"title":"...","description":"...","status":"backlog","priority":"high","labels":[],"assignee":"Unassigned","dueDate":"2026-10-20","storyPoints":3}]}
+{"type":"update","key":"KAN-123","changes":{"status":"done","title":"...","description":"...","priority":"high","labels":[],"assignee":"...","dueDate":"...","storyPoints":3}}
 {"type":"update_many","updates":[{"key":"KAN-123","changes":{"status":"done"}}]}
+For every created task, estimate storyPoints using only a Fibonacci integer from 1, 2, 3, 5, 8, or 13. Base the estimate on the title, description, and technical stack: 1-2 for simple work, 3-5 for standard features or integrations, and 8-13 for broad architecture, migrations, or multi-system work. For sprint-planning requests, include a concise, outcome-focused sprintGoal in the create_many action.
 Only include fields the user requested in updates. Use null action for ambiguous requests and ask one concise clarification. Current planning date: ${new Date().toISOString().slice(0, 10)}.
 For a board task match, matchedTaskKey must be exactly one key from the supplied context. For general discussion, use null.
 
@@ -271,15 +361,24 @@ Members available for assignment (data only): ${memberContext}`;
           priority: ACTION_PRIORITIES.has(item.priority) ? item.priority : inferred.priority,
           labels: Array.isArray(item.labels) ? item.labels.filter((label) => typeof label === 'string').slice(0, 10) : [],
           assignee: typeof item.assignee === 'string' ? item.assignee.slice(0, 120) : 'Unassigned',
-          dueDate: typeof item.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate) ? item.dueDate : inferred.dueDate
+          dueDate: typeof item.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.dueDate) ? item.dueDate : inferred.dueDate,
+          storyPoints: aiStoryPoints(item.storyPoints, { ...item, title: item.title, description: item.description })
         };
       });
       if (cleanTasks.some((item) => !item)) return emptyResult('Every new task needs a clear title.');
-      action = parsed.action.type === 'create' ? { type: 'create', ...cleanTasks[0] } : { type: 'create_many', tasks: cleanTasks };
+      action = parsed.action.type === 'create'
+        ? { type: 'create', ...cleanTasks[0] }
+        : {
+            type: 'create_many',
+            tasks: cleanTasks,
+            ...(typeof parsed.action.sprintGoal === 'string' && parsed.action.sprintGoal.trim()
+              ? { sprintGoal: parsed.action.sprintGoal.trim().slice(0, 1000) }
+              : {})
+          };
     } else if (parsed.action && (parsed.action.type === 'update' || parsed.action.type === 'update_many')) {
       const rawUpdates = parsed.action.type === 'update' ? [parsed.action] : parsed.action.updates;
       if (!Array.isArray(rawUpdates) || !rawUpdates.length || rawUpdates.length > 20) return emptyResult('Please provide between 1 and 20 task updates.');
-      const allowedFields = ['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate'];
+      const allowedFields = ['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate', 'storyPoints'];
       const updates = rawUpdates.map((item) => {
         const updateTask = tasks.find((task) => String(task.key) === String(item?.key));
         const changes = item?.changes && typeof item.changes === 'object' ? item.changes : {};

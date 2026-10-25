@@ -4,6 +4,7 @@
 // the exported service store. Emission is synchronous inside the request
 // handler, so by the time a fetch resolves the events are already recorded.
 import assert from 'node:assert/strict';
+import { todayIsoDate } from './sprintDates.js';
 
 // Must be set before index.js loads: empty URI forces the in-memory path,
 // and dotenv will not override an already-set key.
@@ -47,14 +48,17 @@ try {
   const signInA = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: emailA, password: 'Password123!' }) });
   globalThis.authToken = signInA.body.token;
   const userA = signInA.body.user;
+  const { body: boardsA } = await api('/boards');
 
   const emailB = `event-member-${Date.now()}@example.com`;
   await api('/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Event Member', email: emailB, password: 'Password123!' }) });
   const signInB = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email: emailB, password: 'Password123!' }) });
   const userB = signInB.body.user;
 
-  const { body: sprints } = await api('/sprints');
-  const teamId = sprints[0].id;
+  const createdSprint = await api('/sprints', { method: 'POST', body: JSON.stringify({
+    name: 'Events Sprint', startDate: todayIsoDate(), boardId: boardsA[0].id
+  }) });
+  const teamId = createdSprint.body.id;
 
   // Signup seeds five starter tasks per user (each emitting task.created with
   // the new user as actor), so all creation assertions below are relative to

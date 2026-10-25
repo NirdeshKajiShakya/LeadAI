@@ -1,5 +1,7 @@
 // Mirrors backend/server/lib/sprintDates.js. Sprint boundaries are calendar days,
 // so dates are handled as plain YYYY-MM-DD values and never shifted by a timezone.
+import { formatDate } from './formatDate.js';
+
 export const SPRINT_DURATION_DAYS = 14;
 
 const MS_PER_DAY = 86400000;
@@ -20,6 +22,8 @@ export function endDateForStart(startIso) {
 }
 
 export function formatDateRange(startIso, endIso) {
-  const format = (iso) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  return `${format(startIso)} - ${format(endIso)}`;
+  if (!isCalendarDate(startIso) || !isCalendarDate(endIso)) return 'Dates unavailable';
+  const start = formatDate(startIso);
+  const end = formatDate(endIso);
+  return start && end ? `${start} - ${end}` : 'Dates unavailable';
 }
