@@ -44,9 +44,6 @@ export function isPermittedSprintStatusChange(from, to) {
 export function sprintAcceptsBacklogItem(sprint, task) {
   if (!sprint) return 'Sprint not found.';
   if (task.sprintId) return 'This task is already assigned to a sprint.';
-  if (String(task.ownerId ?? '') !== String(sprint.ownerId ?? '')) {
-    return 'This task belongs to a different project.';
-  }
   if (!sprint.boardId) {
     return 'This sprint is not assigned to a board.';
   }

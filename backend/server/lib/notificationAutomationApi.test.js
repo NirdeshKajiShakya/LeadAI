@@ -96,16 +96,14 @@ try {
     taskAssignmentNotification: true,
     taskReviewAlert: true,
     smartMemberReassignment: false,
-    autoCompleteSubtasks: false,
     overduePriorityEscalation: true,
     sprintKickoffBroadcast: true
   });
-  const ruleUpdate = await api('/automations', ownerToken, {
+  const retiredRuleUpdate = await api('/automations', ownerToken, {
     method: 'PATCH',
     body: JSON.stringify({ boardId, rules: { autoCompleteSubtasks: true } })
   });
-  assert.equal(ruleUpdate.body.rules.autoCompleteSubtasks, true);
-  assert.equal(ruleUpdate.body.rules.taskAssignmentNotification, true);
+  assert.equal(retiredRuleUpdate.status, 400);
   assert.equal((await api('/automations', memberToken, {
     method: 'PATCH', body: JSON.stringify({ boardId, rules: { taskReviewAlert: false } })
   })).status, 403);
@@ -122,6 +120,10 @@ try {
     })
   });
   assert.equal(task.status, 201);
+  await api('/automations', ownerToken, {
+    method: 'PATCH',
+    body: JSON.stringify({ boardId, rules: { taskReviewAlert: false } })
+  });
   const assignment = await eventually(async () => {
     const result = await api('/notifications', memberToken);
     return result.body.notifications.find((item) => item.type === 'task_assigned');
@@ -131,17 +133,64 @@ try {
     method: 'PATCH', body: JSON.stringify({ status: 'review' })
   });
   assert.equal(review.status, 200);
-  await eventually(async () => {
+  await sleep(100);
+  const disabledReviewAlerts = await api('/notifications', ownerToken);
+  assert.equal(disabledReviewAlerts.body.notifications.some((item) =>
+    item.type === 'task_review' && item.metadata.taskKey === task.body.key
+  ), false);
+  const leaveReviewWhileDisabled = await api(`/tasks/${task.body.key}`, ownerToken, {
+    method: 'PATCH', body: JSON.stringify({ status: 'progress' })
+  });
+  assert.equal(leaveReviewWhileDisabled.status, 200);
+  await api('/automations', ownerToken, {
+    method: 'PATCH',
+    body: JSON.stringify({ boardId, rules: { taskReviewAlert: true } })
+  });
+  const reviewWithAlertEnabled = await api(`/tasks/${task.body.key}`, memberToken, {
+    method: 'PATCH', body: JSON.stringify({ status: 'review' })
+  });
+  assert.equal(reviewWithAlertEnabled.status, 200);
+  const memberReviewAlert = await eventually(async () => {
     const result = await api('/notifications', ownerToken);
-    return result.body.notifications.find((item) => item.type === 'task_review');
-  }, 'task review notification was not dispatched');
+    return result.body.notifications.find((item) =>
+      item.type === 'task_review' && item.metadata.taskKey === task.body.key
+    );
+  }, 'board owner did not receive the task review notification');
+  assert.equal(memberReviewAlert.sender, member._id);
 
-  const completed = await api(`/tasks/${task.body.key}`, ownerToken, {
+  const leaveReview = await api(`/tasks/${task.body.key}`, ownerToken, {
+    method: 'PATCH', body: JSON.stringify({ status: 'progress' })
+  });
+  assert.equal(leaveReview.status, 200);
+  const ownerReview = await api(`/tasks/${task.body.key}`, ownerToken, {
+    method: 'PATCH', body: JSON.stringify({ status: 'review' })
+  });
+  assert.equal(ownerReview.status, 200);
+  const ownerReviewAlerts = await eventually(async () => {
+    const result = await api('/notifications', ownerToken);
+    const alerts = result.body.notifications.filter((item) =>
+      item.type === 'task_review' && item.metadata.taskKey === task.body.key
+    );
+    return alerts.length === 2 ? alerts : null;
+  }, 'board owner did not receive an alert after moving the task to review');
+  assert.equal(ownerReviewAlerts.find((item) => item.sender === owner._id)?.recipient, owner._id);
+
+  const retryReview = await api(`/tasks/${task.body.key}`, ownerToken, {
+    method: 'PATCH', body: JSON.stringify({ status: 'review' })
+  });
+  assert.equal(retryReview.status, 200);
+  await sleep(100);
+  const alertsAfterRetry = await api('/notifications', ownerToken);
+  assert.equal(alertsAfterRetry.body.notifications.filter((item) =>
+    item.type === 'task_review' && item.metadata.taskKey === task.body.key
+  ).length, 2);
+
+  const completedChecklist = await api(`/tasks/${task.body.key}`, ownerToken, {
     method: 'PATCH', body: JSON.stringify({ checklist: [{ text: 'Ship implementation', completed: true }] })
   });
-  assert.equal(completed.body.status, 'done');
+  assert.equal(completedChecklist.body.status, 'review');
   const completionHistory = await api(`/tasks/${task.body.key}/history`, ownerToken);
-  assert.ok(completionHistory.body.some((entry) => entry.source === 'automation' && entry.note.includes('checklist item')));
+  assert.equal(completionHistory.body.some((entry) => entry.source === 'automation' && entry.note.includes('checklist item')), false);
 
   await eventually(async () => {
     const result = await api(`/tasks?boardId=${boardId}`, ownerToken);

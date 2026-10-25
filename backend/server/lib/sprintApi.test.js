@@ -29,6 +29,21 @@ async function api(path, options = {}) {
   return { status: response.status, body };
 }
 
+async function signup(label) {
+  const email = `sprint-${label}-${Date.now()}@example.com`;
+  const response = await api('/auth/signup', {
+    method: 'POST',
+    body: JSON.stringify({ name: `Sprint ${label}`, email, password: 'Password123!' })
+  });
+  assert.equal(response.status, 201);
+  const signedIn = await api('/auth/signin', {
+    method: 'POST',
+    body: JSON.stringify({ email, password: 'Password123!' })
+  });
+  assert.equal(signedIn.status, 200);
+  return { email, token: signedIn.body.token };
+}
+
 let passed = 0;
 function check(label, fn) {
   fn();
@@ -49,9 +64,12 @@ try {
   globalThis.authToken = signedIn.body.token;
   const { body: boards } = await api('/boards');
   const boardId = boards[0].id;
+  const boardScope = `?boardId=${encodeURIComponent(boardId)}`;
 
-  const { body: noSprints } = await api('/sprints');
+  const { body: noSprints } = await api(`/sprints${boardScope}`);
   check('reading the sprint list does not create placeholder sprints', () => assert.deepEqual(noSprints, []));
+  const missingBoardScope = await api('/sprints');
+  check('sprint listing requires an explicit board scope', () => assert.equal(missingBoardScope.status, 400));
   const unavailableAi = await api('/ai/sprints', {
     method: 'POST',
     body: JSON.stringify({ goal: 'Plan a sprint for backend refactoring' })
@@ -60,7 +78,7 @@ try {
     assert.equal(unavailableAi.status, 503);
     assert.equal(unavailableAi.body.code, 'AI_NOT_CONFIGURED');
   });
-  const { body: stillEmpty } = await api('/sprints');
+  const { body: stillEmpty } = await api(`/sprints${boardScope}`);
   check('the failed AI generation leaves the sprint list empty', () => assert.deepEqual(stillEmpty, []));
 
   const createdActive = await api('/sprints', {
@@ -81,8 +99,8 @@ try {
   check('sprint exposes a persisted goal', () => assert.equal(createdActive.body.goal, 'Ship the first product increment'));
 
   const sprintId = createdActive.body.id;
-  const { body: backlogBefore } = await api('/backlog');
-  const { body: sprintTasksBefore } = await api(`/sprints/${sprintId}/tasks`);
+  const { body: backlogBefore } = await api(`/backlog${boardScope}`);
+  const { body: sprintTasksBefore } = await api(`/sprints/${sprintId}/tasks${boardScope}`);
   check('every task is in exactly one backlog list', () => {
     assert.equal(backlogBefore.length + sprintTasksBefore.length, 5);
   });
@@ -91,8 +109,8 @@ try {
   const moved = await api(`/sprints/${sprintId}/tasks`, { method: 'POST', body: JSON.stringify({ key: task.key }) });
   check('moving a task to the sprint returns 201', () => assert.equal(moved.status, 201));
 
-  const { body: backlogAfter } = await api('/backlog');
-  const { body: sprintTasksAfter } = await api(`/sprints/${sprintId}/tasks`);
+  const { body: backlogAfter } = await api(`/backlog${boardScope}`);
+  const { body: sprintTasksAfter } = await api(`/sprints/${sprintId}/tasks${boardScope}`);
   check('task left the product backlog', () => assert.equal(backlogAfter.some((t) => t.key === task.key), false));
   check('task entered the sprint backlog', () => assert.equal(sprintTasksAfter.some((t) => t.key === task.key), true));
   check('task is not duplicated across lists', () => {
@@ -131,8 +149,8 @@ try {
   check('a second To Do item can enter the sprint', () => assert.equal(addedForReturn.status, 201));
   const removed = await api(`/sprints/${sprintId}/tasks/${returnable.key}`, { method: 'DELETE' });
   check('removing a task returns 200', () => assert.equal(removed.status, 200));
-  const { body: backlogRestored } = await api('/backlog');
-  const { body: sprintTasksRestored } = await api(`/sprints/${sprintId}/tasks`);
+  const { body: backlogRestored } = await api(`/backlog${boardScope}`);
+  const { body: sprintTasksRestored } = await api(`/sprints/${sprintId}/tasks${boardScope}`);
   check('removed task is back in the product backlog', () => {
     assert.equal(backlogRestored.some((t) => t.key === returnable.key), true);
     assert.equal(sprintTasksRestored.some((t) => t.key === returnable.key), false);
@@ -197,6 +215,57 @@ try {
     body: JSON.stringify({ name: 'Unscoped Sprint', startDate: todayIsoDate() })
   });
   check('sprint creation requires an explicit board', () => assert.equal(missingBoardSprint.status, 400));
+  const missingBacklogBoard = await api('/backlog');
+  check('product backlog listing requires an explicit board', () => assert.equal(missingBacklogBoard.status, 400));
+
+  const teammate = await signup('Teammate');
+  const ownerToken = globalThis.authToken;
+  const sharedBoard = await api(`/boards/${boardId}/members`, {
+    method: 'POST',
+    body: JSON.stringify({ email: teammate.email })
+  });
+  check('board owner can invite a teammate', () => assert.equal(sharedBoard.status, 201));
+  globalThis.authToken = teammate.token;
+  const { body: notifications } = await api('/notifications');
+  const invitation = notifications.notifications.find((item) => item.type === 'board_invite');
+  const accepted = await api('/boards/invite/respond', {
+    method: 'POST',
+    body: JSON.stringify({ notificationId: invitation.id, action: 'accept' })
+  });
+  check('teammate accepts the board invitation', () => assert.equal(accepted.status, 200));
+  const { body: teammateSprints } = await api(`/sprints${boardScope}`);
+  check('sprints are visible to every member of their board', () => {
+    assert.equal(teammateSprints.length, 2);
+    assert.ok(teammateSprints.every((sprint) => sprint.boardId === boardId));
+  });
+  const { body: teammateBacklog } = await api(`/backlog${boardScope}`);
+  check('shared board backlog includes tasks created by the board owner', () => {
+    assert.ok(teammateBacklog.length > 0);
+    assert.ok(teammateBacklog.every((item) => item.boardId === boardId));
+  });
+  const teammateMove = await api(`/sprints/${sprintId}/tasks${boardScope}`, {
+    method: 'POST',
+    body: JSON.stringify({ key: teammateBacklog[0].key })
+  });
+  check('a board member can add another member’s backlog task to a board sprint', () => assert.equal(teammateMove.status, 201));
+  globalThis.authToken = ownerToken;
+  const { body: ownerSprintTasks } = await api(`/sprints/${sprintId}/tasks${boardScope}`);
+  check('sprint tasks are shared with all board members', () => {
+    assert.ok(ownerSprintTasks.some((task) => task.key === teammateBacklog[0].key));
+  });
+  const teammateTaskReturn = await api(`/sprints/${sprintId}/tasks/${teammateBacklog[0].key}${boardScope}`, { method: 'DELETE' });
+  check('the board owner can return a shared sprint task to the Product Backlog', () => assert.equal(teammateTaskReturn.status, 200));
+  globalThis.authToken = teammate.token;
+  const teammateSprint = await api('/sprints', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Teammate Sprint', goal: 'Shared board planning', boardId })
+  });
+  check('a board member can create a sprint on the shared board', () => assert.equal(teammateSprint.status, 201));
+  globalThis.authToken = ownerToken;
+  const { body: ownerSprintsAfterInvite } = await api(`/sprints${boardScope}`);
+  check('the board owner sees sprints created by another board member', () => {
+    assert.ok(ownerSprintsAfterInvite.some((sprint) => sprint.id === teammateSprint.body.id));
+  });
 
   const rejections = [
     ['end before start', '/sprints', { name: 'X', startDate: '2026-10-05', endDate: '2026-10-01' }],

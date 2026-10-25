@@ -6,8 +6,8 @@ LeadAI is an AI-assisted project planning and team workspace. It helps teams tur
 
 - Organize work on boards with Backlog, To Do, In Progress, In Review / QA, and Done columns.
 - Create and update tasks with priorities, due dates, labels, story points, checklists, attachments, and comments.
-- Plan and track sprints, view a work dashboard, and manage team members and profiles.
-- Use AI Copilot to help plan boards, estimate story points, and assign work based on member skills.
+- Plan and track sprints on the selected board; each board has its own sprint list and backlog.
+- Use AI Copilot to create a sprint from backlog work, update sprint details, plan boards, estimate story points, and assign work based on member skills.
 - Receive notifications and configure task automation.
 - Sign up and manage your own workspace with authenticated accounts.
 

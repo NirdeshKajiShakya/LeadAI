@@ -115,8 +115,12 @@ try {
   const signedIn = await api('/auth/signin', { method: 'POST', body: JSON.stringify({ email, password: 'Password123!' }) });
   token = signedIn.body.token;
 
-  const { body: initialBacklog } = await api('/backlog');
-  const boardId = initialBacklog[0].boardId;
+  const missingBoardBacklog = await api('/backlog');
+  check('Product Backlog requires a selected board', () => assert.equal(missingBoardBacklog.status, 400));
+  const { body: boards } = await api('/boards');
+  const boardId = boards[0].id;
+  const boardScope = `?boardId=${encodeURIComponent(boardId)}`;
+  const { body: initialBacklog } = await api(`/backlog${boardScope}`);
   const { body: noSprints } = await api(`/sprints?boardId=${encodeURIComponent(boardId)}`);
   check('new accounts start without a generated placeholder sprint', () => assert.deepEqual(noSprints, []));
   const createdSprint = await api('/sprints', {
@@ -125,7 +129,7 @@ try {
       name: 'Sprint 1',
       goal: 'Ship the first product increment',
       startDate: todayIsoDate(),
-      boardId: initialBacklog[0].boardId,
+      boardId,
       taskKeys: [initialBacklog[0].key]
     })
   });
@@ -143,7 +147,7 @@ try {
 
   check('seeded work is stored outside every sprint', () => assert.ok(initialBacklog.length >= 5));
   const selectedTasks = await api(`/sprints/${activeSprint.id}/tasks`);
-  const backlogAfterCreate = await api('/backlog');
+  const backlogAfterCreate = await api(`/backlog${boardScope}`);
   check('selected tasks leave the Product Backlog and enter To Do', () => {
     assert.equal(selectedTasks.body.some((task) => task.key === initialBacklog[0].key && task.status === 'todo'), true);
     assert.equal(backlogAfterCreate.body.some((task) => task.key === initialBacklog[0].key), false);
@@ -161,7 +165,7 @@ try {
   const low = await createTask({ title: 'Low backlog item', priority: 'low', storyPoints: 8 });
   const lowTwin = await createTask({ title: 'Second low item', priority: 'low', storyPoints: 1 });
 
-  const { body: ordered } = await api('/backlog');
+  const { body: ordered } = await api(`/backlog${boardScope}`);
   check('new backlog items persist without a sprint assignment', () => {
     for (const task of [urgent, high, medium, low, lowTwin]) {
       const stored = ordered.find((item) => item.key === task.key);
@@ -187,7 +191,7 @@ try {
   check('the item enters the sprint through To Do', () => assert.equal(moved.body.status, 'todo'));
   check('the item records the sprint assignment', () => assert.equal(String(moved.body.sprintId), String(activeSprint.id)));
 
-  const { body: backlogAfterMove } = await api('/backlog');
+  const { body: backlogAfterMove } = await api(`/backlog${boardScope}`);
   const { body: sprintAfterMove } = await api(`/sprints/${activeSprint.id}/tasks`);
   check('the item disappears from the Product Backlog', () => assert.equal(backlogAfterMove.some((task) => task.key === high.key), false));
   check('the item appears in the sprint To Do column', () => {
@@ -228,7 +232,7 @@ try {
   check('a second item can enter the sprint', () => assert.equal(returnable.status, 201));
   const returned = await api(`/sprints/${activeSprint.id}/tasks/${urgent.key}`, { method: 'DELETE' });
   check('To Do -> Product Backlog returns 200', () => assert.equal(returned.status, 200));
-  const { body: backlogRestored } = await api('/backlog');
+  const { body: backlogRestored } = await api(`/backlog${boardScope}`);
   const { body: sprintRestored } = await api(`/sprints/${activeSprint.id}/tasks`);
   check('returning preserves the task and clears its sprint assignment', () => {
     const restored = backlogRestored.find((task) => task.key === urgent.key);
@@ -242,7 +246,7 @@ try {
   check('an upcoming sprint is created', () => assert.equal(upcoming.body.current.state, 'upcoming'));
   const intoFuture = await api(`/sprints/${upcoming.body.id}/tasks`, { method: 'POST', body: JSON.stringify({ key: medium.key }) });
   check('an inactive sprint cannot accept backlog items', () => assert.equal(intoFuture.status, 409));
-  const { body: backlogAfterFuture } = await api('/backlog');
+  const { body: backlogAfterFuture } = await api(`/backlog${boardScope}`);
   check('the item stays in the Product Backlog when no active sprint applies', () => {
     assert.equal(backlogAfterFuture.some((task) => task.key === medium.key), true);
   });
@@ -259,7 +263,7 @@ try {
     body: JSON.stringify({ name: 'Other Sprint', startDate: todayIsoDate(), boardId: otherBoardId })
   }, otherSignedIn.body.token);
   const intrusion = await api(`/sprints/${otherSprint.body.id}/tasks`, { method: 'POST', body: JSON.stringify({ key: low.key }) });
-  check('another project\'s sprint cannot receive the task', () => assert.equal(intrusion.status, 404));
+  check('another project\'s sprint cannot receive the task', () => assert.equal(intrusion.status, 403));
 
   const bypass = await api(`/tasks/${low.key}`, { method: 'PATCH', body: JSON.stringify({ sprintId: activeSprint.id }) });
   check('sprint assignment cannot be bypassed through a generic task edit', () => assert.equal(bypass.status, 409));

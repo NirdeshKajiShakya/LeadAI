@@ -80,6 +80,14 @@ try {
     body: JSON.stringify({ email: teammate.email })
   }, owner.token);
   assert.equal(invite.status, 201);
+  const invitations = await api('/notifications', {}, teammate.token);
+  const boardInvite = invitations.body.notifications.find((item) => item.type === 'board_invite');
+  assert.ok(boardInvite);
+  const acceptedInvite = await api('/boards/invite/respond', {
+    method: 'POST',
+    body: JSON.stringify({ notificationId: boardInvite.id, action: 'accept' })
+  }, teammate.token);
+  assert.equal(acceptedInvite.status, 200);
 
   const genericPrompt = await api('/copilot/chat', {
     method: 'POST',

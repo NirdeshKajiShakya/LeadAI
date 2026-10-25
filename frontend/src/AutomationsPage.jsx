@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  AlertTriangle, BellRing, CheckCircle2, CircleDot, LoaderCircle, Play, Settings2, Sparkles, Users
+  AlertTriangle, BellRing, LoaderCircle, Play, Settings2, Sparkles, Users
 } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -18,25 +18,17 @@ const RULES = [
     id: 'taskReviewAlert',
     title: 'Task review alert',
     trigger: 'When a task moves into In Review / QA.',
-    action: 'Notify board maintainers and the task creator.',
-    icon: CircleDot,
+    action: 'Notify the board owner and task creator.',
+    icon: BellRing,
     category: 'Notifications'
   },
   {
     id: 'smartMemberReassignment',
     title: 'Smart member departure reassignment',
     trigger: 'When a member is removed from this board.',
-    action: 'Use member skills and active workload to reassign open tasks and add an audit note.',
+    action: 'Match open tasks against active members’ listed skills, distribute unmatched tasks, and add an audit note.',
     icon: Users,
     category: 'AI workflow'
-  },
-  {
-    id: 'autoCompleteSubtasks',
-    title: 'Auto-complete on subtasks',
-    trigger: 'When every checklist item on a task is checked.',
-    action: 'Move the task to Done / Verified when its workflow allows.',
-    icon: CheckCircle2,
-    category: 'Task management'
   },
   {
     id: 'overduePriorityEscalation',
@@ -60,7 +52,6 @@ const DEFAULT_RULES = {
   taskAssignmentNotification: true,
   taskReviewAlert: true,
   smartMemberReassignment: false,
-  autoCompleteSubtasks: false,
   overduePriorityEscalation: true,
   sprintKickoffBroadcast: true
 };
@@ -139,7 +130,7 @@ export default function AutomationsPage({ token, activeBoardId, activeBoard }) {
           <p>Choose which routine board actions LeadAI handles for you.</p>
         </div>
         <div className="automation-header-status">
-          <span className="automation-status-pill"><i /> {enabledCount} of 6 active</span>
+          <span className="automation-status-pill"><i /> {enabledCount} of {RULES.length} active</span>
           <span className="automation-board-name">{activeBoard?.name || 'No board selected'}</span>
         </div>
       </header>

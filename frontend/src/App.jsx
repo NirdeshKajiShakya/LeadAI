@@ -11,6 +11,7 @@ import BellNotifications from './components/notifications/BellNotifications';
 import Dashboard from './Dashboard.jsx';
 import AutomationsPage from './AutomationsPage.jsx';
 import { formatDate } from './formatDate.js';
+import { formatRelativeTime } from './relativeTime.js';
 import SettingsPage from './SettingsPage.jsx';
 import SetupWizard from './SetupWizard.jsx';
 const LandingPage = lazy(() => import('./LandingPage.jsx'));
@@ -192,7 +193,7 @@ function App() {
     setActiveBoardId(boardId);
     // On Home the board selector is a workspace filter, not a navigation
     // control. Everywhere else it opens the board that was picked.
-    if (pathname !== '/') navigate('/board');
+    if (pathname !== '/' && pathname !== '/backlog') navigate('/board');
   }
 
   async function signOut() {
@@ -525,7 +526,7 @@ const workspaceName = activeBoard ? `${activeBoard.name}'s workspace` : (user?.n
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Copilot request failed.');
-      if (data.action?.type === 'created' || data.action?.type === 'updated' || data.action?.type === 'created_many' || data.action?.type === 'updated_many') {
+      if (data.action?.type === 'created' || data.action?.type === 'updated' || data.action?.type === 'created_many' || data.action?.type === 'updated_many' || data.action?.type === 'sprint_created' || data.action?.type === 'sprint_updated') {
         const refreshed = await fetch(`${API_BASE_URL}/api/tasks?boardId=${encodeURIComponent(activeBoardId)}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
@@ -787,13 +788,12 @@ function BoardManager({ token, boards, setBoards, navigate, user }) {
   const owned = boards.filter((board) => board.isOwner);
   const shared = boards.filter((board) => !board.isOwner);
   const initials = (person) => String(person.name || person.email || '?').split(/\s+/).map((part) => part[0]).slice(0, 2).join('').toUpperCase();
-  const formatActive = (timestamp) => timestamp ? `${Math.max(1, Math.round((Date.now() - timestamp) / 86400000))}d ago` : 'No activity yet';
   const renderCard = (board) => {
     const stat = stats[board.id] || { total: 0, done: 0, updatedAt: 0 };
     const percent = stat.total ? Math.round((stat.done / stat.total) * 100) : 0;
     return <article className="team-board-card" key={board.id}>
       <div className="team-board-card-head"><span className={`team-role-badge ${board.isOwner ? 'is-owner' : ''}`}>{board.isOwner ? 'Owner' : 'Member'}</span><div className="team-menu-wrap"><button className="team-icon-button" onClick={() => setMenuBoardId(menuBoardId === board.id ? null : board.id)} aria-label={`Actions for ${board.name}`}><MoreHorizontal size={18} /></button>{menuBoardId === board.id && <div className="team-action-menu">{board.isOwner ? <><button onClick={() => rename(board)}><Pencil size={14} /> Rename</button><button className="is-danger" onClick={() => remove(board)}><Trash2 size={14} /> Delete</button></> : <button className="is-danger" onClick={() => leave(board)}><LogOut size={14} /> Leave board</button>}</div>}</div></div>
-      <button className="team-board-open" onClick={() => navigate(`/board?boardId=${encodeURIComponent(board.id)}`)}><h3>{board.name}</h3><p>{board.isOwner ? 'Your workspace board for focused delivery.' : 'A board shared with you for collaboration.'}</p><div className="team-board-meta"><span><Users size={14} /> {board.memberIds.length} member{board.memberIds.length === 1 ? '' : 's'}</span><span><Clock3 size={14} /> {formatActive(stat.updatedAt)}</span></div></button>
+      <button className="team-board-open" onClick={() => navigate(`/board?boardId=${encodeURIComponent(board.id)}`)}><h3>{board.name}</h3><p>{board.isOwner ? 'Your workspace board for focused delivery.' : 'A board shared with you for collaboration.'}</p><div className="team-board-meta"><span><Users size={14} /> {board.memberIds.length} member{board.memberIds.length === 1 ? '' : 's'}</span><span><Clock3 size={14} /> {formatRelativeTime(stat.updatedAt)}</span></div></button>
       <div className="team-board-footer"><div className="team-member-stack">{(board.members || []).slice(0, 4).map((member) => <span key={member.id} title={member.email}>{initials(member)}</span>)}{board.members?.length > 4 && <span className="is-more">+{board.members.length - 4}</span>}</div><span className="team-completion"><Check size={13} /> {percent}% complete</span></div>
       {board.isOwner && <button className="team-invite-link" onClick={() => { setSelectedBoard(board); setModal('invite'); }}><Mail size={14} /> Invite member</button>}
     </article>;

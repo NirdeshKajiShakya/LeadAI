@@ -70,4 +70,67 @@ assert.deepEqual(
   { reply: 'Ready to help.', matchedTaskKey: null }
 );
 
+const originalFetch = globalThis.fetch;
+setOverride('OPENROUTER_API_KEY', 'test-api-key');
+try {
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          reply: 'Sprint plan ready.',
+          matchedTaskKey: null,
+          action: {
+            type: 'sprint_plan',
+            sprintName: 'Launch Sprint',
+            sprintGoal: 'Prepare the product launch',
+            selectedTaskKeys: ['KAN-BACKLOG', 'KAN-IN-SPRINT', 'KAN-UNKNOWN'],
+            tasks: [{
+              title: 'Validate the launch checklist',
+              description: 'Review and verify every launch requirement.',
+              status: 'todo',
+              priority: 'high',
+              labels: ['launch'],
+              storyPoints: 3
+            }]
+          }
+        })
+      }
+    }]
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const sprintPlan = await chatWithContext('Create a sprint for the launch.', [
+    { key: 'KAN-BACKLOG', title: 'Prepare launch', status: 'backlog' },
+    { key: 'KAN-IN-SPRINT', title: 'Already planned', status: 'todo', sprintId: 'existing-sprint' }
+  ], columns, [], []);
+  assert.deepEqual(sprintPlan.action.selectedTaskKeys, ['KAN-BACKLOG']);
+  assert.equal(sprintPlan.action.sprintName, 'Launch Sprint');
+  assert.equal(sprintPlan.action.tasks.length, 1);
+  assert.equal(sprintPlan.action.tasks[0].status, 'todo');
+
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          reply: 'Sprint goal updated.',
+          matchedTaskKey: null,
+          action: {
+            type: 'update_sprint',
+            id: 'valid-sprint-id',
+            changes: { goal: 'Ship the checkout flow', unsafeField: 'ignored' }
+          }
+        })
+      }
+    }]
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const sprintUpdate = await chatWithContext('Update the sprint goal.', [], columns, [], [{ id: 'valid-sprint-id', name: 'Sprint' }]);
+  assert.deepEqual(sprintUpdate.action, {
+    type: 'update_sprint',
+    id: 'valid-sprint-id',
+    changes: { goal: 'Ship the checkout flow' }
+  });
+} finally {
+  globalThis.fetch = originalFetch;
+  setOverride('OPENROUTER_API_KEY', '');
+}
+
 console.log('AI helper safety checks passed.');

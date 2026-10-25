@@ -20,6 +20,11 @@ const notificationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     default: null
   },
+  dedupeKey: {
+    type: String,
+    unique: true,
+    sparse: true
+  },
   metadata: {
     type: mongoose.Schema.Types.Mixed,
     default: {}

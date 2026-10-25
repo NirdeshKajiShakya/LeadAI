@@ -14,6 +14,7 @@ import {
   BACKLOG_STATUS, SPRINT_ENTRY_STATUS, isPermittedSprintStatusChange,
   sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
 } from './lib/taskTransitions.js';
+import { fallbackSprintName, fallbackSprintPlan } from './lib/sprintPlan.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
 import {
   connectDatabase, databaseStatus, normalizeMongoUri, parseDatabaseName,
@@ -183,33 +184,30 @@ const store = {
   // Board and profile queries are owner-scoped in the database; a shared database must
   // never require loading every developer's tasks to show one person's board.
   listByOwner: (ownerId) => mongoReady ? Task.find({ ownerId }).sort({ createdAt: 1 }).lean() : Promise.resolve(memoryTasks.filter((task) => String(task.ownerId) === String(ownerId))),
-  listWithoutSprint: (ownerId, boardId) => {
+  listWithoutSprint: (boardId) => {
     if (!mongoReady) return Promise.resolve(memoryTasks.filter((task) =>
       !task.sprintId
-      && (!ownerId || String(task.ownerId) === String(ownerId))
-      && (!boardId || String(task.boardId || '') === String(boardId))
+      && String(task.boardId || '') === String(boardId)
     ));
-    const filter = { sprintId: null };
-    if (ownerId) filter.ownerId = ownerId;
-    if (boardId) filter.boardId = boardId;
-    return Task.find(filter).sort({ createdAt: 1 }).lean();
+    return Task.find({ sprintId: null, boardId }).sort({ createdAt: 1 }).lean();
   }
 };
 
 const sprintStore = {
-  list: (ownerId, boardId) => {
+  listByBoard: (boardId) => {
     if (!mongoReady) return Promise.resolve(memorySprints.filter((sprint) =>
-      String(sprint.ownerId) === String(ownerId)
-      && (!boardId || String(sprint.boardId || '') === String(boardId))
+      String(sprint.boardId || '') === String(boardId)
     ));
-    const filter = { ownerId };
-    if (boardId) filter.boardId = boardId;
-    return Sprint.find(filter).sort({ createdAt: 1 }).lean();
+    return Sprint.find({ boardId }).sort({ createdAt: 1 }).lean();
   },
-  find: (id, ownerId) => {
-    if (!mongoReady) return Promise.resolve(memorySprints.find((sprint) => sprintId(sprint) === String(id) && String(sprint.ownerId) === String(ownerId)));
+  listByOwner: (ownerId) => {
+    if (!mongoReady) return Promise.resolve(memorySprints.filter((sprint) => String(sprint.ownerId) === String(ownerId)));
+    return Sprint.find({ ownerId }).sort({ createdAt: 1 }).lean();
+  },
+  find: (id) => {
+    if (!mongoReady) return Promise.resolve(memorySprints.find((sprint) => sprintId(sprint) === String(id)));
     // A malformed id would otherwise throw a CastError and surface as a 500.
-    return mongoose.isValidObjectId(id) ? Sprint.findOne({ _id: id, ownerId }).lean() : Promise.resolve(null);
+    return mongoose.isValidObjectId(id) ? Sprint.findById(id).lean() : Promise.resolve(null);
   },
   create: async (data) => {
     if (mongoReady) return new Sprint(data).save();
@@ -217,17 +215,17 @@ const sprintStore = {
     memorySprints = [...memorySprints, sprint];
     return sprint;
   },
-  update: async (id, ownerId, data) => {
-    if (mongoReady) return Sprint.findOneAndUpdate({ _id: id, ownerId }, { $set: data }, { new: true, runValidators: true }).lean();
-    const current = await sprintStore.find(id, ownerId);
+  update: async (id, data) => {
+    if (mongoReady) return Sprint.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true }).lean();
+    const current = await sprintStore.find(id);
     if (!current) return null;
     memorySprints = memorySprints.map((sprint) => sprintId(sprint) === String(id) ? { ...sprint, ...data } : sprint);
-    return sprintStore.find(id, ownerId);
+    return sprintStore.find(id);
   },
-  remove: async (id, ownerId) => {
-    if (mongoReady) return Sprint.deleteOne({ _id: id, ownerId });
+  remove: async (id) => {
+    if (mongoReady) return Sprint.deleteOne({ _id: id });
     const before = memorySprints.length;
-    memorySprints = memorySprints.filter((sprint) => sprintId(sprint) !== String(id) || String(sprint.ownerId) !== String(ownerId));
+    memorySprints = memorySprints.filter((sprint) => sprintId(sprint) !== String(id));
     return { deletedCount: before - memorySprints.length };
   }
 };
@@ -290,17 +288,121 @@ function sprintView(sprint, tasks = []) {
   return { ...sprint, id: sprintId(sprint), durationDays: diffCalendarDays(sprint.startDate, sprint.endDate) + 1, progress, current };
 }
 
+async function persistSprintPlan({ ownerId, board, name, goal, selectedTaskKeys = [], tasks = [], members = [] }) {
+  const boardIdValue = boardId(board);
+  const backlog = await store.listWithoutSprint(boardIdValue);
+  const backlogByKey = new Map(backlog.map((task) => [String(task.key), task]));
+  const keys = [...new Set(selectedTaskKeys.map(String))];
+  if (keys.length !== selectedTaskKeys.length || keys.length > 20 || tasks.length > 20 || keys.length + tasks.length > 20) {
+    throw createAuthError(400, 'A sprint can contain at most 20 unique backlog and generated tasks.');
+  }
+  const selectedTasks = keys.map((key) => backlogByKey.get(key));
+  if (selectedTasks.some((task) => !task)) {
+    throw createAuthError(409, 'One or more selected tasks are no longer in this board’s Product Backlog.');
+  }
+  if (!selectedTasks.length && !tasks.length) {
+    throw createAuthError(422, 'The sprint plan did not select any backlog tasks or generate new tasks.');
+  }
+  for (const task of tasks) validateTaskInput(task, false);
+
+  const startDate = todayIsoDate();
+  const endDate = endDateForStart(startDate);
+  let createdSprint = null;
+  const movedTasks = [];
+  const createdTaskKeys = [];
+  try {
+    createdSprint = await sprintStore.create({
+      ownerId,
+      name: String(name || '').trim().slice(0, 120) || `${board.name} Sprint`,
+      goal: String(goal || '').trim().slice(0, 1000),
+      startDate,
+      endDate,
+      boardId: boardIdValue
+    });
+
+    const sprintTasks = [];
+    let fallbackMemberIndex = 0;
+    for (const task of selectedTasks) {
+      const updated = await store.update(task.key, { sprintId: sprintId(createdSprint), status: SPRINT_ENTRY_STATUS });
+      if (!updated) throw new Error(`Backlog task ${task.key} could not be added to the sprint.`);
+      movedTasks.push({ key: task.key, sprintId: task.sprintId ?? null, status: task.status });
+      sprintTasks.push(updated);
+    }
+
+    for (const task of tasks) {
+      let assignee = String(task.assignee || 'Unassigned').trim();
+      if (!assignee || assignee.toLowerCase() === 'unassigned') {
+        const skilled = findBestSkilledMember(task, members);
+        const fallback = members.length ? members[fallbackMemberIndex++ % members.length] : null;
+        assignee = (skilled || fallback)?.name || 'Unassigned';
+      } else {
+        assignee = resolveBoardAssignee(assignee, members);
+      }
+      let key;
+      do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
+      const created = await store.create({
+        key,
+        ownerId,
+        boardId: boardIdValue,
+        title: task.title.trim(),
+        description: task.description || '',
+        status: SPRINT_ENTRY_STATUS,
+        priority: task.priority,
+        labels: [...new Set(task.labels || [])],
+        assignee,
+        dueDate: task.dueDate || '',
+        sprintId: sprintId(createdSprint),
+        storyPoints: aiStoryPoints(task.storyPoints, task),
+        aiSuggested: true,
+        comments: [],
+        attachments: [],
+        dependencies: []
+      });
+      createdTaskKeys.push(key);
+      sprintTasks.push(created);
+    }
+
+    return {
+      sprint: sprintView(createdSprint, sprintTasks),
+      tasksCreated: createdTaskKeys.length,
+      tasksSelected: selectedTasks.length
+    };
+  } catch (error) {
+    for (const key of createdTaskKeys) {
+      try { await store.remove(key); } catch (rollbackError) {
+        console.error(`[sprint] could not remove generated task ${key} during rollback:`, rollbackError.message);
+      }
+    }
+    for (const task of movedTasks) {
+      try { await store.update(task.key, { sprintId: task.sprintId, status: task.status }); } catch (rollbackError) {
+        console.error(`[sprint] could not restore backlog task ${task.key} during rollback:`, rollbackError.message);
+      }
+    }
+    if (createdSprint) {
+      try { await sprintStore.remove(sprintId(createdSprint)); } catch (rollbackError) {
+        console.error(`[sprint] could not remove sprint ${sprintId(createdSprint)} during rollback:`, rollbackError.message);
+      }
+    }
+    throw error;
+  }
+}
+
 async function authorizedSprint(req, res) {
   const id = String(req.params.id || '');
   if (!/^[a-zA-Z0-9_-]{8,}$/.test(id)) {
     res.status(400).json({ error: 'Invalid sprint id.' });
     return null;
   }
-  const sprint = await sprintStore.find(id, userId(req));
+  const sprint = await sprintStore.find(id);
   if (!sprint) {
     res.status(404).json({ error: 'Sprint not found.' });
     return null;
   }
+  if (!sprint.boardId) {
+    res.status(404).json({ error: 'Sprint is not assigned to a board.' });
+    return null;
+  }
+  if (!await authorizedBoard({ ...req, params: { id: String(sprint.boardId) } }, res)) return null;
   if (req.query.boardId && String(req.query.boardId) !== String(sprint.boardId || '')) {
     res.status(404).json({ error: 'Sprint not found on this board.' });
     return null;
@@ -380,7 +482,7 @@ async function buildDashboard(req, requestedBoardId = null) {
     boardOpenTaskCounts(accessibleIds),
     assignedOpenTasks(accessibleIds, names),
     assignedOpenTaskCounts(accessibleIds, names, today),
-    sprintStore.list(uid)
+    Promise.all(boards.map((board) => sprintStore.listByBoard(boardId(board)))).then((boardSprints) => boardSprints.flat())
   ]);
 
   const boardById = new Map(boards.map((board) => [boardId(board), board]));
@@ -754,7 +856,7 @@ function profileUpdates(body) {
 
 async function profilePayload(user) {
   const ownerId = String(user._id);
-  const [tasks, sprints] = await Promise.all([store.listByOwner(ownerId), sprintStore.list(ownerId)]);
+  const [tasks, sprints] = await Promise.all([store.listByOwner(ownerId), sprintStore.listByOwner(ownerId)]);
   const currentSprint = sprints[0] || null;
   const sprintTasks = currentSprint ? tasks.filter((task) => String(task.sprintId) === sprintId(currentSprint)) : [];
   return {
@@ -1242,7 +1344,7 @@ app.delete('/api/boards/:id/members/:memberId', requireAuth, async (req, res, ne
               await writeAutomationHistory({
                 task,
                 actorId: userId(req),
-                note: `AI reassigned this task from ${removedMember.name || removedMember.email} to ${nextMember.name} after their departure.`
+                note: `Automatically reassigned this task from ${removedMember.name || removedMember.email} to ${nextMember.name} after their departure using skill matching and workload distribution.`
               });
             } catch (historyError) {
               console.error(`[automation] could not write reassignment audit note for ${task.key}:`, historyError);
@@ -1287,9 +1389,10 @@ app.post('/api/auth/reset-password', async (req, res, next) => {
 
 app.get('/api/sprints', requireAuth, async (req, res, next) => {
   try {
-    const requestedBoardId = req.query.boardId ? String(req.query.boardId) : null;
-    if (requestedBoardId && !await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
-    const sprints = await sprintStore.list(userId(req), requestedBoardId);
+    const requestedBoardId = String(req.query.boardId || '');
+    if (!requestedBoardId) return res.status(400).json({ error: 'A board is required to list sprints.' });
+    if (!await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
+    const sprints = await sprintStore.listByBoard(requestedBoardId);
     res.json(await Promise.all(sprints.map(async (sprint) => sprintView(sprint, await store.listBySprint(sprintId(sprint), sprint.boardId)))));
   } catch (error) { next(error); }
 });
@@ -1354,7 +1457,7 @@ app.post('/api/sprints', requireAuth, async (req, res, next) => {
     res.status(201).json(sprintView(createdSprint, sprintTasks));
   } catch (error) {
     for (const task of movedTasks) await store.update(task.key, { sprintId: null, status: task.status }).catch(() => {});
-    if (createdSprint) await sprintStore.remove(sprintId(createdSprint), userId(req)).catch(() => {});
+    if (createdSprint) await sprintStore.remove(sprintId(createdSprint)).catch(() => {});
     next(error);
   }
 });
@@ -1383,7 +1486,7 @@ app.patch('/api/sprints/:id', requireAuth, async (req, res, next) => {
     const dateValidation = validateSprintRange(startDate, endDate);
     if (!dateValidation.ok) return res.status(400).json({ error: dateValidation.error });
     updates.startDate = startDate; updates.endDate = endDate;
-    const updated = await sprintStore.update(sprintId(sprint), userId(req), updates);
+    const updated = await sprintStore.update(sprintId(sprint), updates);
     res.json(sprintView(updated, await store.listBySprint(sprintId(updated), updated.boardId)));
   } catch (error) { next(error); }
 });
@@ -1397,11 +1500,10 @@ app.get('/api/sprints/:id/tasks', requireAuth, async (req, res, next) => {
 });
 app.get('/api/backlog', requireAuth, async (req, res, next) => {
   try {
-    // Sprints are owner-scoped, so an owner-scoped query is what keeps the Product
-    // Backlog consistent with the sprint list (and avoids loading other developers' rows).
-    const requestedBoardId = req.query.boardId ? String(req.query.boardId) : null;
-    if (requestedBoardId && !await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
-    const tasks = await store.listWithoutSprint(userId(req), requestedBoardId);
+    const requestedBoardId = String(req.query.boardId || '');
+    if (!requestedBoardId) return res.status(400).json({ error: 'A board is required to read the Product Backlog.' });
+    if (!await authorizedBoard({ ...req, params: { id: requestedBoardId } }, res)) return;
+    const tasks = await store.listWithoutSprint(requestedBoardId);
     const accessible = (await Promise.all(tasks.map(async (task) => (await canAccess(task, req)) ? task : null))).filter(Boolean);
     res.json(sortBacklog(accessible));
   } catch (error) { next(error); }
@@ -1470,8 +1572,9 @@ app.post('/api/tasks', requireAuth, async (req, res, next) => {
     if (!board) return res.status(404).json({ error: 'Create a board before adding tasks.' });
     let sprint = null;
     if (req.body.sprintId) {
-      sprint = await sprintStore.find(req.body.sprintId, userId(req));
+      sprint = await sprintStore.find(req.body.sprintId);
       if (!sprint) return res.status(404).json({ error: 'Sprint not found.' });
+      if (String(sprint.boardId || '') !== boardId(board)) return res.status(409).json({ error: 'Sprint belongs to a different board.' });
       const blocked = sprintAcceptsBacklogItem(sprint, { sprintId: null, ownerId: userId(req), boardId: boardId(board) });
       if (blocked) return res.status(409).json({ error: blocked });
     }
@@ -1531,6 +1634,10 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     if (updates.title !== undefined) updates.title = updates.title.trim();
     if (updates.assignee !== undefined) updates.assignee = updates.assignee.trim() || 'Unassigned';
     if (updates.labels) updates.labels = [...new Set(updates.labels)];
+    if (updates.status === 'review' && task.status !== 'review') {
+      updates.reviewEnteredAt = new Date();
+      updates.reviewTransitionId = crypto.randomUUID();
+    }
     if (req.body.assignee !== undefined || req.body.assigneeId !== undefined) {
       const board = task.boardId ? await boardStore.find(task.boardId) : null;
       const members = board ? await boardMembers(board) : [];
@@ -1556,28 +1663,6 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
     let updatedTask = await store.update(task.key, updates);
     if (!updatedTask) return res.status(404).json({ error: 'Task not found.' });
     const board = updatedTask.boardId ? await boardStore.find(updatedTask.boardId) : null;
-    if (board && updates.checklist?.length && updates.checklist.every((item) => item.completed)
-      && task.status !== 'done'
-      && (!task.sprintId || isPermittedSprintStatusChange(task.status, 'done'))) {
-      const completed = await dispatchAutomation(boardId(board), 'autoCompleteSubtasks', async () => {
-        const result = await store.update(task.key, { status: 'done' });
-        if (result) {
-          try {
-            await writeAutomationHistory({
-              task: result,
-              actorId: userId(req),
-              from: task.status,
-              to: 'done',
-              note: 'Task was automatically completed because every checklist item was checked off.',
-            });
-          } catch (historyError) {
-            console.error(`[automation] could not write completion audit note for ${task.key}:`, historyError);
-          }
-        }
-        return result;
-      });
-      if (completed) updatedTask = completed;
-    }
     if (board && String(updatedTask.assigneeId || '') !== String(task.assigneeId || '')
       && updatedTask.assigneeId && String(updatedTask.assigneeId) !== userId(req)) {
       dispatchAutomation(boardId(board), 'taskAssignmentNotification', () => notifySafely({
@@ -1590,23 +1675,34 @@ app.patch('/api/tasks/:key', requireAuth, async (req, res, next) => {
         metadata: { boardId: boardId(board), taskKey: updatedTask.key }
       }));
     }
-    if (board && task.status !== 'review' && updatedTask.status === 'review') {
-      dispatchAutomation(boardId(board), 'taskReviewAlert', async () => {
-        const recipients = new Set([String(board.ownerId), String(updatedTask.ownerId || '')]);
-        recipients.delete(userId(req));
+    if (board && updatedTask.status === 'review' && updatedTask.reviewEnteredAt
+      && (await getAutomationRules(boardId(board))).taskReviewAlert) {
+      const recipients = new Set([String(board.ownerId), String(updatedTask.ownerId || '')]);
+      try {
         for (const recipient of recipients) {
           if (!recipient) continue;
-          await notifySafely({
+          await createInAppNotification({
             recipient,
             sender: userId(req),
             type: 'task_review',
             title: 'Task ready for review',
             message: `${updatedTask.key}: ${updatedTask.title} moved to In Review / QA.`,
             relatedId: updatedTask._id || updatedTask.key,
-            metadata: { boardId: boardId(board), taskKey: updatedTask.key, status: 'review' }
+            dedupeKey: `task_review:${updatedTask.key}:${updatedTask.reviewTransitionId || new Date(updatedTask.reviewEnteredAt).toISOString()}:${recipient}`,
+            metadata: {
+              boardId: boardId(board),
+              taskKey: updatedTask.key,
+              status: 'review',
+              reviewEnteredAt: updatedTask.reviewEnteredAt
+            }
           });
         }
-      });
+      } catch (error) {
+        console.error(`[notification] Required review alert could not be persisted for ${updatedTask.key}:`, error);
+        return res.status(503).json({
+          error: 'Review notifications could not be saved. Retry this task update to complete delivery.'
+        });
+      }
     }
     if (board) dispatchAutomation(boardId(board), 'overduePriorityEscalation', () => escalateOverdueTask(updatedTask, board));
     res.json(updatedTask);
@@ -1763,13 +1859,59 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
     const tasks = await store.list();
     const boardTasks = tasks.filter((t) => String(t.boardId || '') === boardId);
     const members = await boardMembers(board);
+    const boardSprints = await sprintStore.listByBoard(boardId);
 
     const columns = BOARD_COLUMNS;
 
-    const result = await chatWithContext(message, boardTasks, columns, members);
-    if (result.action?.type === 'create' || result.action?.type === 'create_many') {
+    const result = await chatWithContext(message, boardTasks, columns, members, boardSprints);
+    if (result.action?.type === 'sprint_plan') {
+      const plan = await persistSprintPlan({
+        ownerId: userId(req),
+        board,
+        name: result.action.sprintName,
+        goal: result.action.sprintGoal || message,
+        selectedTaskKeys: result.action.selectedTaskKeys,
+        tasks: result.action.tasks,
+        members
+      });
+      result.action = {
+        type: 'sprint_created',
+        sprintId: plan.sprint.id,
+        boardId,
+        tasksCreated: plan.tasksCreated,
+        tasksSelected: plan.tasksSelected
+      };
+      result.reply = `Created “${plan.sprint.name}” on ${board.name} with ${plan.tasksSelected} backlog task${plan.tasksSelected === 1 ? '' : 's'} and ${plan.tasksCreated} new task${plan.tasksCreated === 1 ? '' : 's'}. Open Sprint Backlog to review it.`;
+    } else if (result.action?.type === 'update_sprint') {
+      const sprint = boardSprints.find((item) => sprintId(item) === result.action.id);
+      if (!sprint) throw createAuthError(404, 'That sprint is no longer on the current board.');
+      const changes = result.action.changes;
+      const updates = {};
+      if (changes.name !== undefined) {
+        if (typeof changes.name !== 'string') throw createAuthError(400, 'Sprint name must be text.');
+        updates.name = changes.name.trim();
+        if (!updates.name || updates.name.length > 120) throw createAuthError(400, 'Sprint name must be between 1 and 120 characters.');
+      }
+      if (changes.goal !== undefined) {
+        if (typeof changes.goal !== 'string') throw createAuthError(400, 'Sprint goal must be text.');
+        updates.goal = changes.goal.trim();
+        if (updates.goal.length > 1000) throw createAuthError(400, 'Sprint goal must be 1000 characters or fewer.');
+      }
+      if (changes.startDate !== undefined || changes.endDate !== undefined) {
+        const startDate = changes.startDate ?? sprint.startDate;
+        const endDate = changes.endDate ?? sprint.endDate;
+        const dateValidation = validateSprintRange(startDate, endDate);
+        if (!dateValidation.ok) throw createAuthError(400, dateValidation.error);
+        updates.startDate = startDate;
+        updates.endDate = endDate;
+      }
+      const updated = await sprintStore.update(sprintId(sprint), updates);
+      result.action = { type: 'sprint_updated', sprintId: sprintId(updated), boardId };
+      result.reply = `Updated “${updated.name}” on ${board.name}.`;
+    } else if (result.action?.type === 'create' || result.action?.type === 'create_many') {
       const requestedTasks = result.action.type === 'create' ? [result.action] : result.action.tasks;
       const assignmentNotes = [];
+      let fallbackMemberIndex = 0;
       requestedTasks.forEach((item) => {
         validateTaskInput(item, false);
         const requested = String(item.assignee || 'Unassigned').trim();
@@ -1780,10 +1922,10 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
             item.assignee = skilled.name;
             assignmentNotes.push(`Assigned “${item.title}” to ${skilled.name} (skill match).`);
           } else {
-            const random = pickRandomMember(members);
-            if (random) {
-              item.assignee = random.name;
-              assignmentNotes.push(`Assigned “${item.title}” randomly to ${random.name} (no skill match found).`);
+            const fallback = members.length ? members[fallbackMemberIndex++ % members.length] : null;
+            if (fallback) {
+              item.assignee = fallback.name;
+              assignmentNotes.push(`Assigned “${item.title}” to ${fallback.name} (no skill match found).`);
             } else {
               item.assignee = 'Unassigned';
             }
@@ -1945,8 +2087,6 @@ app.post('/api/ai/boards', requireAuth, async (req, res, next) => {
 });
 
 app.post('/api/ai/sprints', requireAuth, async (req, res, next) => {
-  let createdSprint = null;
-  const createdTaskKeys = [];
   try {
     const goal = typeof req.body?.goal === 'string' ? req.body.goal.trim() : '';
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
@@ -1966,71 +2106,51 @@ app.post('/api/ai/sprints', requireAuth, async (req, res, next) => {
     if (!board) return;
 
     const members = await boardMembers(board);
-    const planMessage = `Plan a prioritized 14-day engineering sprint${name ? ` named "${name}"` : ''} for this goal: ${goal}. `
-      + 'Return a concise sprintGoal summarizing the milestone. Create up to 20 implementation-sized sprint tasks, each with a concrete description, risk-based priority, labels, and an estimated Fibonacci storyPoints integer (1, 2, 3, 5, 8, or 13). '
-      + 'Put every task in To Do. Assign each task only to a listed team member whose skills match the task; otherwise leave it Unassigned. '
-      + 'Return a create_many action with sprintGoal, not a conversational answer.';
-    const result = await chatWithContext(planMessage, [], BOARD_COLUMNS, members);
-    const plannedTasks = tasksFromAiResult(result);
-    if (!plannedTasks.length) {
+    const backlog = sortBacklog(await store.listWithoutSprint(boardId(board))).slice(0, 100);
+    const planMessage = `Plan a focused 14-day engineering sprint${name ? ` named "${name}"` : ''} for this goal: ${goal}. `
+      + 'Use the supplied Product Backlog first: select only the backlog task keys that directly support this goal, and do not repeat their tasks as new work. '
+      + 'If the backlog does not contain enough suitable work, add only the missing implementation-sized tasks. '
+      + 'Always return a non-empty sprint_plan action for this valid sprint request. For a whole-project goal, select the most relevant existing backlog tasks; if none fit, create concrete tasks. '
+      + 'Include a concise sprintName and outcome-focused sprintGoal, selectedTaskKeys, and at most 20 total selected and new tasks. '
+      + 'Give each new task a concrete description, risk-based priority, labels, and Fibonacci storyPoints (1, 2, 3, 5, 8, or 13). '
+      + 'Assign new tasks only to a listed team member whose skills match; otherwise leave Unassigned.';
+    let result;
+    try {
+      result = await chatWithContext(planMessage, backlog, BOARD_COLUMNS, members, [], { throwOnError: true });
+    } catch (aiError) {
+      console.error('AI sprint planning failed:', aiError.message);
+      return res.status(502).json({
+        error: 'The AI provider could not create a sprint plan. Check the AI provider settings and try again.',
+        code: 'AI_PROVIDER_ERROR'
+      });
+    }
+    const action = result.action;
+    let plannedTasks = action?.type === 'sprint_plan'
+      ? action.tasks
+      : tasksFromAiResult(result);
+    let selectedTaskKeys = action?.type === 'sprint_plan' ? action.selectedTaskKeys : [];
+    if (!plannedTasks.length && !selectedTaskKeys.length) {
+      const fallback = fallbackSprintPlan(backlog);
+      plannedTasks = fallback.tasks;
+      selectedTaskKeys = fallback.selectedTaskKeys;
+    }
+    if (!plannedTasks.length && !selectedTaskKeys.length) {
       return res.status(422).json({
-        error: 'The AI planner could not create a sprint plan. Refine the brief or create the sprint manually.',
+        error: 'The AI planner returned no usable work, and this board has no eligible Product Backlog tasks to add. Add backlog tasks or try again.',
         code: 'AI_NO_PLAN'
       });
     }
-    for (const task of plannedTasks) validateTaskInput(task, false);
-
-    const startDate = todayIsoDate();
-    const endDate = endDateForStart(startDate);
-    createdSprint = await sprintStore.create({
+    const plan = await persistSprintPlan({
       ownerId: userId(req),
-      name: name || `${board.name} Sprint`,
-      goal: result.action.sprintGoal || goal,
-      startDate,
-      endDate,
-      boardId: boardId(board)
+      board,
+      name: name || action?.sprintName || fallbackSprintName(goal, board.name),
+      goal: action?.sprintGoal || goal,
+      selectedTaskKeys,
+      tasks: plannedTasks,
+      members
     });
-
-    const createdTasks = [];
-    for (const task of plannedTasks) {
-      let assignee = String(task.assignee || 'Unassigned').trim();
-      if (!assignee || assignee.toLowerCase() === 'unassigned') {
-        const skilled = findBestSkilledMember(task, members);
-        const fallback = skilled || pickRandomMember(members);
-        assignee = fallback?.name || 'Unassigned';
-      } else {
-        assignee = resolveBoardAssignee(assignee, members);
-      }
-      let key;
-      do { key = `KAN-${crypto.randomInt(100, 1000)}`; } while (await store.find(key));
-      const created = await store.create({
-        key,
-        ownerId: userId(req),
-        boardId: boardId(board),
-        title: task.title.trim(),
-        description: task.description || '',
-        status: SPRINT_ENTRY_STATUS,
-        priority: task.priority,
-        labels: [...new Set(task.labels || [])],
-        assignee,
-        dueDate: task.dueDate || '',
-        sprintId: sprintId(createdSprint),
-        storyPoints: aiStoryPoints(task.storyPoints, task),
-        aiSuggested: true,
-        comments: [],
-        attachments: [],
-        dependencies: []
-      });
-      createdTaskKeys.push(key);
-      createdTasks.push(created);
-    }
-    res.status(201).json({
-      sprint: sprintView(createdSprint, createdTasks),
-      tasksCreated: createdTasks.length
-    });
+    res.status(201).json(plan);
   } catch (error) {
-    for (const key of createdTaskKeys) await store.remove(key).catch(() => {});
-    if (createdSprint) await sprintStore.remove(sprintId(createdSprint), userId(req)).catch(() => {});
     next(error);
   }
 });

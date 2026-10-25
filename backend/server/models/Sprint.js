@@ -5,7 +5,7 @@ const sprintSchema = new mongoose.Schema({
   ownerId: { type: String, required: true, index: true },
   // The team this sprint belongs to. Sprints created outside a team have null.
   teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null, index: true },
-  boardId: { type: String, default: null, index: true },
+  boardId: { type: String, required: true, index: true },
   name: { type: String, required: true, trim: true },
   goal: { type: String, default: '' },
   // Stored as calendar-day strings so sprint days never shift with the server timezone.
@@ -15,6 +15,7 @@ const sprintSchema = new mongoose.Schema({
 });
 
 sprintSchema.index({ ownerId: 1, createdAt: 1 });
+sprintSchema.index({ boardId: 1, createdAt: 1 });
 sprintSchema.virtual('durationDays').get(function durationDays() {
   return diffCalendarDays(this.startDate, this.endDate) + 1;
 });

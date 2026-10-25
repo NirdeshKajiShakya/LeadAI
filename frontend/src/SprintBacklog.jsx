@@ -22,11 +22,11 @@ const sprintGroups = [
 
 const initials = (name = '') => name.split(' ').filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || '?';
 
-// Only an active sprint (its date window contains today) can accept backlog items, so
-// prefer it when the page opens instead of defaulting to the oldest sprint.
+// Prefer an active sprint, but still select the first existing sprint when there is no
+// active one so changing boards never hides that board's upcoming or completed sprints.
 function pickSprintId(list, current) {
   if (current && list.some((sprint) => sprint.id === current)) return current;
-  return list.find((sprint) => sprint.current?.state === 'active')?.id ?? null;
+  return list.find((sprint) => sprint.current?.state === 'active')?.id ?? list[0]?.id ?? null;
 }
 
 async function request(path, token, options = {}) {
@@ -108,6 +108,10 @@ export default function SprintBacklog({ token, activeBoardId = '', activeBoardNa
       setSelectedId(null);
       setSprintTasks([]);
       setBacklogTasks([]);
+      setEditing(null);
+      setAiPlannerOpen(false);
+      setAiGoal('');
+      setAiError('');
       if (!activeBoardId) {
         setLoading(false);
         return;
@@ -236,7 +240,14 @@ export default function SprintBacklog({ token, activeBoardId = '', activeBoardNa
       {aiError && <p className="sb-ai-error" role="alert">{aiError}</p>}
     </form>}
 
-    {!loading && !selected && <div className="sb-empty">
+    {!loading && !activeBoardId && <div className="sb-empty">
+      <span className="sb-empty-icon"><Target size={22} /></span>
+      <div className="eyebrow">Sprint planning</div>
+      <h2>Choose a Board</h2>
+      <p>Select a board from the workspace selector to view or create its sprints.</p>
+    </div>}
+
+    {!loading && activeBoardId && !selected && <div className="sb-empty">
       <span className="sb-empty-icon"><Target size={22} /></span>
       <div className="eyebrow">Sprint planning</div>
       <h2>No Active Sprint Found</h2>

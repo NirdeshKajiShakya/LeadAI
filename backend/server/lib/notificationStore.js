@@ -27,7 +27,7 @@ function notificationView(notification) {
 }
 
 export async function createInAppNotification({
-  recipient, sender = null, type, title, message, relatedId = null, metadata = {}
+  recipient, sender = null, type, title, message, relatedId = null, metadata = {}, dedupeKey = null
 }) {
   if (!recipient || typeof title !== 'string' || typeof message !== 'string') {
     throw new Error('A recipient, title, and message are required for a notification.');
@@ -39,27 +39,47 @@ export async function createInAppNotification({
     title: title.trim(),
     message: message.trim(),
     relatedId: relatedId === null ? null : String(relatedId),
+    ...(dedupeKey ? { dedupeKey: String(dedupeKey) } : {}),
     metadata: { ...metadata },
     status: 'unread',
     createdAt: new Date()
   };
 
   if (databaseReady) {
-    const notification = await Notification.create({
-      ...record,
-      recipient: new mongoose.Types.ObjectId(record.recipient),
-      sender: record.sender ? new mongoose.Types.ObjectId(record.sender) : null,
-      relatedId: record.relatedId && mongoose.isValidObjectId(record.relatedId)
-        ? new mongoose.Types.ObjectId(record.relatedId)
-        : null,
-      userId: record.recipient,
-      body: record.message,
-      meta: record.metadata,
-      read: false
-    });
-    return notificationView(notification);
+    const recipientId = new mongoose.Types.ObjectId(record.recipient);
+    if (record.dedupeKey) {
+      const existing = await Notification.findOne({ recipient: recipientId, dedupeKey: record.dedupeKey }).lean();
+      if (existing) return notificationView(existing);
+    }
+    try {
+      const notification = await Notification.create({
+        ...record,
+        recipient: recipientId,
+        sender: record.sender ? new mongoose.Types.ObjectId(record.sender) : null,
+        relatedId: record.relatedId && mongoose.isValidObjectId(record.relatedId)
+          ? new mongoose.Types.ObjectId(record.relatedId)
+          : null,
+        userId: record.recipient,
+        body: record.message,
+        meta: record.metadata,
+        read: false
+      });
+      return notificationView(notification);
+    } catch (error) {
+      if (record.dedupeKey && error?.code === 11000) {
+        const existing = await Notification.findOne({ recipient: recipientId, dedupeKey: record.dedupeKey }).lean();
+        if (existing) return notificationView(existing);
+      }
+      throw error;
+    }
   }
 
+  if (record.dedupeKey) {
+    const existing = memoryNotifications.find((item) =>
+      item.dedupeKey === record.dedupeKey && item.recipient === record.recipient
+    );
+    if (existing) return notificationView(existing);
+  }
   const notification = { ...record, _id: crypto.randomUUID(), id: null, userId: record.recipient, body: record.message, read: false };
   notification.id = notification._id;
   memoryNotifications.unshift(notification);
