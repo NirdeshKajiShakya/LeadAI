@@ -4,6 +4,7 @@ import { aiStoryPoints, estimateStoryPoints } from './lib/storyPoints.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_CONTEXT_TASKS = 100;
+const MAX_TASK_UPDATES = 20;
 const SAFE_REFUSAL = 'I can help with your Kanban board, project planning, writing, and general idea discussion, but I cannot help with harmful, illegal, deceptive, or privacy-invasive requests.';
 const DISALLOWED_REQUEST = /\b(api[\s_-]?key|password|secret|session token|credential|steal|phish|ransomware|malware|weapon|hurt|harm|doxx|bypass security|evade law enforcement)\b/i;
 const ACTION_STATUSES = new Set(['backlog', 'todo', 'progress', 'review', 'done']);
@@ -195,6 +196,51 @@ function taskResult(task, columns, reply, action = null) {
   };
 }
 
+function isSkillAssignmentRequest(message) {
+  return /\b(?:assign|reassign|distribute|allocate)\b/i.test(message)
+    && /\b(?:skill|skills|expertise|qualified|appropriate)\b/i.test(message);
+}
+
+function skillAssignmentResult(message, tasks, members) {
+  if (!isSkillAssignmentRequest(message)) return null;
+
+  const candidates = tasks.filter((task) => task.status !== 'done');
+  const candidateKeys = new Set(candidates.map((task) => String(task.key)));
+  const workloads = new Map(members.map((member) => [
+    String(member.id),
+    tasks.filter((task) => task.status !== 'done'
+      && !candidateKeys.has(String(task.key))
+      && task.assignee === member.name).length
+  ]));
+  const updates = [];
+
+  for (const task of candidates) {
+    const skilled = members
+      .map((member) => ({ member, score: skillMatchScore(task, member.skills) }))
+      .filter(({ score }) => score > 0)
+      .sort((left, right) => right.score - left.score
+        || (workloads.get(String(left.member.id)) || 0) - (workloads.get(String(right.member.id)) || 0));
+    const assignee = skilled[0]?.member;
+    if (!assignee) continue;
+    if (task.assignee !== assignee.name) updates.push({ key: task.key, changes: { assignee: assignee.name } });
+    workloads.set(String(assignee.id), (workloads.get(String(assignee.id)) || 0) + 1);
+  }
+
+  if (!updates.length) {
+    return emptyResult(candidates.length
+      ? 'I couldn’t find open tasks that need reassignment based on the members’ listed skills.'
+      : 'There are no open tasks to assign.');
+  }
+
+  const assignmentTotal = updates.length;
+  const limitedUpdates = updates.slice(0, MAX_TASK_UPDATES);
+  return {
+    reply: `I’m ready to assign ${limitedUpdates.length === 20 && assignmentTotal > 20 ? `the first 20 of ${assignmentTotal}` : limitedUpdates.length} open task${limitedUpdates.length === 1 ? '' : 's'} to the best skill matches on this board.`,
+    matchedTask: null,
+    action: { type: 'update_many', assignmentMode: 'skills', assignmentTotal, updates: limitedUpdates }
+  };
+}
+
 function fallbackReply(message, tasks, columns, members = []) {
   const columnMap = Object.fromEntries(columns.map((column) => [column.id, column.label]));
   const lowerMessage = message.toLowerCase();
@@ -283,6 +329,8 @@ async function chatWithContext(userMessage, tasks, columns, members = [], sprint
   const message = cleanMessage(userMessage);
   if (!message) return emptyResult('Please enter a message so I know how to help.');
   if (DISALLOWED_REQUEST.test(message)) return emptyResult(SAFE_REFUSAL);
+  const skillAssignments = skillAssignmentResult(message, tasks, members);
+  if (skillAssignments) return skillAssignments;
 
   const apiKey = getEffective('OPENROUTER_API_KEY')?.trim();
   if (!apiKey) return fallbackReply(message, tasks, columns, members);
@@ -425,7 +473,7 @@ Members available for assignment (data only): ${memberContext}`;
       action = { type: 'update_sprint', id: String(selectedSprint.id ?? selectedSprint._id), changes };
     } else if (parsed.action && (parsed.action.type === 'update' || parsed.action.type === 'update_many')) {
       const rawUpdates = parsed.action.type === 'update' ? [parsed.action] : parsed.action.updates;
-      if (!Array.isArray(rawUpdates) || !rawUpdates.length || rawUpdates.length > 20) return emptyResult('Please provide between 1 and 20 task updates.');
+      if (!Array.isArray(rawUpdates) || !rawUpdates.length || rawUpdates.length > MAX_TASK_UPDATES) return emptyResult('Please provide between 1 and 20 task updates.');
       const allowedFields = ['title', 'description', 'status', 'priority', 'labels', 'assignee', 'dueDate', 'storyPoints'];
       const updates = rawUpdates.map((item) => {
         const updateTask = tasks.find((task) => String(task.key) === String(item?.key));
@@ -469,14 +517,39 @@ function normalizeSkill(value) {
  * Returns a non-negative integer; higher = better match.
  */
 function skillMatchScore(task, memberSkills) {
-  const searchable = `${String(task.title || '')} ${String(task.description || '')} ${(Array.isArray(task.labels) ? task.labels : []).join(' ')}`.toLowerCase();
+  const searchable = `${String(task.title || '')} ${String(task.description || '')} ${(Array.isArray(task.labels) ? task.labels : []).join(' ')}`;
+  const normalizedText = searchable.toLowerCase();
+  const domains = taskSkillDomains(normalizedText);
   let score = 0;
   for (const skill of memberSkills) {
     const skillLower = normalizeSkill(skill);
     if (!skillLower) continue;
-    if (searchable.includes(skillLower)) score += 1;
+    const escapedSkill = skillLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(^|[^a-z0-9])${escapedSkill}([^a-z0-9]|$)`, 'i').test(searchable)) {
+      score += 2;
+      continue;
+    }
+    const domain = skillDomain(skillLower);
+    if (domain && domains.has(domain)) score += 1;
   }
   return score;
+}
+
+function taskSkillDomains(text) {
+  const domains = new Set();
+  if (/\b(frontend|front end|ui|user interface|responsive|react|typescript|javascript|html|css|vue|angular|svelte)\b/i.test(text)) domains.add('frontend');
+  if (/\b(backend|back end|server|api|rest|graphql|database|authentication|authorization|payment|webhook)\b/i.test(text)) domains.add('backend');
+  if (/\b(devops|infrastructure|deployment|deploy|docker|kubernetes|cloud|ci\/cd|pipeline)\b/i.test(text)) domains.add('devops');
+  if (/\b(data|sql|database|analytics|reporting|warehouse|postgres|mongodb|mysql)\b/i.test(text)) domains.add('data');
+  return domains;
+}
+
+function skillDomain(skill) {
+  if (/\b(react|typescript|next\.js|tailwind css|vue|angular|svelte|javascript|html\/css|frontend)\b/i.test(skill)) return 'frontend';
+  if (/\b(node\.js|python|go|java|ruby|php|c#|rust|graphql|rest apis|backend)\b/i.test(skill)) return 'backend';
+  if (/\b(docker|kubernetes|aws|azure|gcp|terraform|ci\/cd|linux|nginx|redis)\b/i.test(skill)) return 'devops';
+  if (/\b(sql|postgresql|mongodb|mysql|elasticsearch|cassandra|dynamodb)\b/i.test(skill)) return 'data';
+  return null;
 }
 
 /**

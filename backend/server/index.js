@@ -1975,9 +1975,17 @@ app.post('/api/copilot/chat', requireAuth, async (req, res, next) => {
       });
       const updated = [];
       for (const item of prepared) updated.push(await store.update(item.task.key, item.changes));
+      const skillAssignment = result.action.assignmentMode === 'skills';
+      const assignmentTotal = Number(result.action.assignmentTotal) || updated.length;
       result.action = { type: 'updated_many', keys: updated.map((item) => item.key), changes: prepared.map((item) => item.changes) };
       result.matchedTask = updated.length === 1 ? { key: updated[0].key, title: updated[0].title, columnName: columns.find((column) => column.id === updated[0].status).label } : null;
-      result.reply = `Updated ${updated.length} tasks on the board.`;
+      const assignmentOnly = prepared.every(({ changes }) => Object.keys(changes).every((field) => field === 'assignee'));
+      if (assignmentOnly && skillAssignment) {
+        const remaining = Math.max(0, assignmentTotal - updated.length);
+        result.reply = `Reassigned ${updated.length} tasks according to the members’ listed skills.${remaining ? ` ${remaining} more task${remaining === 1 ? '' : 's'} can be handled in a follow-up.` : ''}`;
+      } else {
+        result.reply = `Updated ${updated.length} tasks on the board.`;
+      }
     }
     res.json(result);
   } catch (error) { next(error); }

@@ -65,6 +65,26 @@ assert.equal(briefResult.action.tasks[0].title, 'Gather hotel content and bookin
 assert.ok(briefResult.action.tasks.every((task) => task.description.length > 40));
 assert.ok(briefResult.action.tasks.every((task) => /^\d{4}-\d{2}-\d{2}$/.test(task.dueDate)));
 
+const skillAssignment = await chatWithContext(
+  'assign the tasks according to the appropriate skills of the members instead of giving all the tasks to John',
+  [
+    { key: 'KAN-FRONT-1', title: 'Build product page', status: 'backlog', labels: ['frontend'], assignee: 'John' },
+    { key: 'KAN-FRONT-2', title: 'Build settings page', status: 'todo', labels: ['frontend'], assignee: 'John' },
+    { key: 'KAN-BACK-1', title: 'Implement product API', status: 'backlog', labels: ['backend'], assignee: 'John' },
+    { key: 'KAN-DONE', title: 'Completed frontend work', status: 'done', labels: ['frontend'], assignee: 'John' }
+  ],
+  columns,
+  [
+    { id: 'alice', name: 'Alice', skills: ['React'] },
+    { id: 'bob', name: 'Bob', skills: ['TypeScript', 'Node.js'] }
+  ]
+);
+assert.equal(skillAssignment.action.type, 'update_many');
+assert.deepEqual(skillAssignment.action.updates.map(({ key }) => key), ['KAN-FRONT-1', 'KAN-FRONT-2', 'KAN-BACK-1']);
+assert.equal(skillAssignment.action.updates[0].changes.assignee, 'Alice');
+assert.equal(skillAssignment.action.updates[1].changes.assignee, 'Bob');
+assert.equal(skillAssignment.action.updates[2].changes.assignee, 'Bob');
+
 assert.deepEqual(
   parseAssistantJson('User Safety: safe\n{"reply":"Ready to help.","matchedTaskKey":null}'),
   { reply: 'Ready to help.', matchedTaskKey: null }

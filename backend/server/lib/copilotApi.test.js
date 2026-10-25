@@ -120,10 +120,33 @@ try {
   assert.ok(created.some((task) => task.assignee === teammate.name));
   assert.ok(created.every((task) => [1, 2, 3, 5, 8, 13].includes(task.storyPoints)));
 
+  for (const task of created) {
+    const forcedAssignee = await api(`/tasks/${task.key}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ assignee: owner.name })
+    }, owner.token);
+    assert.equal(forcedAssignee.status, 200);
+  }
+  const skillAssignment = await api('/copilot/chat', {
+    method: 'POST',
+    body: JSON.stringify({
+      boardId: board.id,
+      message: 'assign the tasks according to the appropriate skills of the members instead of giving all the tasks to John'
+    })
+  }, owner.token);
+  assert.equal(skillAssignment.status, 200);
+  assert.equal(skillAssignment.body.action.type, 'updated_many');
+  assert.match(skillAssignment.body.reply, /reassigned .* according to the members’ listed skills/i);
+  const reassignedTasks = await api(`/tasks?boardId=${encodeURIComponent(board.id)}`, {}, owner.token);
+  const reassigned = reassignedTasks.body.filter((task) => explicitPrompt.body.action.keys.includes(task.key));
+  assert.ok(reassigned.filter((task) => task.labels.includes('frontend')).every((task) => task.assignee === owner.name));
+  assert.ok(reassigned.filter((task) => task.labels.includes('backend')).every((task) => task.assignee === teammate.name));
+
   console.log('  ok  project requests with "some task" create a useful task plan');
   console.log('  ok  approximate numeric requests create the requested number of tasks');
   console.log('  ok  generated tasks persist and are assigned to current board members');
-  console.log('\n3 Copilot API checks passed.');
+  console.log('  ok  existing tasks are reassigned by member skills instead of one person');
+  console.log('\n4 Copilot API checks passed.');
 } finally {
   server.kill();
 }
