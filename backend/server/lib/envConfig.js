@@ -1,9 +1,6 @@
 // Runtime environment-var overrides set through the Settings page.
-//
-// Values set here take precedence over backend/.env; when a key has no override
-// the process.env value (loaded from .env) is used as the fallback. Overrides
-// live in memory only and are lost on server restart, at which point .env
-// applies again -- which is exactly the intended "backup" behaviour.
+// Persisted setup values are written to backend/.env; overrides take precedence
+// until restart, after which dotenv loads the persisted values into process.env.
 const overrides = Object.create(null);
 let setupComplete = false;
 

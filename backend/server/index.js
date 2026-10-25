@@ -15,7 +15,10 @@ import {
   sprintAcceptsBacklogItem, statusLabel, taskCanReturnToBacklog
 } from './lib/taskTransitions.js';
 import { User, USERNAME_PATTERN } from './models/User.js';
-import { connectDatabase, databaseStatus, normalizeMongoUri, parseDatabaseName, reconnectDatabase } from './db.js';
+import {
+  connectDatabase, databaseStatus, normalizeMongoUri, parseDatabaseName,
+  reconnectDatabase, testMongoConnection
+} from './db.js';
 import { Board } from './models/Board.js';
 import { TaskHistory } from './models/TaskHistory.js';
 import {
@@ -36,6 +39,7 @@ import {
 } from './auth.js';
 import { chatWithContext, MAX_MESSAGE_LENGTH, findBestSkilledMember, pickRandomMember } from './ai.js';
 import { aiStoryPoints, isValidStoryPoints } from './lib/storyPoints.js';
+import { persistEnvSettings, restoreEnvFile } from './lib/envFile.js';
 import {
   setOverride, removeOverride, clearOverrides, getAllEffective, getEffective,
   getOverride, markSetupComplete, isSetupComplete
@@ -49,7 +53,10 @@ import {
 } from './lib/aiBoardPlan.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.join(__dirname, '../.env') });
+const backendEnvPath = process.env.LEADAI_ENV_FILE || path.join(__dirname, '../.env');
+const backendEnvTemplatePath = path.join(__dirname, '../.env.example');
+dotenv.config({ path: backendEnvPath });
+if (process.env.LEADAI_SETUP_COMPLETE === 'true') markSetupComplete();
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -882,6 +889,31 @@ app.post('/api/system/configure', (req, res, next) => {
   const previousMongoUri = String(getEffective('MONGODB_URI') || '').trim() || 'mongodb://localhost:27017/leadai';
   const uriChanged = nextMongoUri !== previousMongoUri;
 
+  if (uriChanged && databaseStatus().mode !== 'memory') {
+    try {
+      await testMongoConnection(nextMongoUri);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+  }
+
+  const persistedSettings = {
+    MONGODB_URI: nextMongoUri,
+    LEADAI_SETUP_COMPLETE: 'true',
+    ...(!skipAI ? { OPENROUTER_API_KEY: openrouterApiKey.trim() } : {})
+  };
+  let envSnapshot;
+  try {
+    envSnapshot = await persistEnvSettings(persistedSettings, backendEnvPath, backendEnvTemplatePath);
+  } catch (error) {
+    console.error('[system] Could not persist setup configuration:', error.message);
+    return res.status(500).json({ error: 'Could not persist the setup configuration to backend/.env.' });
+  }
+
+  const previousProcessEnv = Object.fromEntries(
+    Object.keys(persistedSettings).map((key) => [key, Object.hasOwn(process.env, key) ? process.env[key] : undefined])
+  );
+  Object.assign(process.env, persistedSettings);
   try {
     setOverride('MONGODB_URI', nextMongoUri);
     if (!skipAI) setOverride('OPENROUTER_API_KEY', openrouterApiKey.trim());
@@ -889,11 +921,24 @@ app.post('/api/system/configure', (req, res, next) => {
       try {
         const status = await reconnectDatabase();
         updateDatabaseReadiness(status);
-      } catch {
+      } catch (connectionError) {
         if (previousMongoOverride === undefined) removeOverride('MONGODB_URI');
         else setOverride('MONGODB_URI', previousMongoOverride);
         if (previousOpenrouterOverride === undefined) removeOverride('OPENROUTER_API_KEY');
         else setOverride('OPENROUTER_API_KEY', previousOpenrouterOverride);
+        for (const [key, value] of Object.entries(previousProcessEnv)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+        try {
+          await restoreEnvFile(envSnapshot, backendEnvPath);
+        } catch (restoreError) {
+          console.error('[system] Could not restore previous backend/.env:', restoreError.message);
+          updateDatabaseReadiness();
+          return res.status(503).json({
+            error: 'Could not connect to the selected database, and the previous backend/.env could not be restored.'
+          });
+        }
         try {
           const restoredStatus = await reconnectDatabase();
           updateDatabaseReadiness(restoredStatus);
@@ -903,6 +948,7 @@ app.post('/api/system/configure', (req, res, next) => {
             error: 'Could not connect to the selected database, and the previous database connection could not be restored.'
           });
         }
+        console.error('[system] Could not connect after setup configuration:', connectionError.message);
         return res.status(400).json({ error: 'Could not connect to the selected MongoDB database. Previous settings were restored.' });
       }
     }

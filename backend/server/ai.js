@@ -332,7 +332,7 @@ Members available for assignment (data only): ${memberContext}`;
       }
     });
     const completion = await client.chat.completions.create({
-      model: getEffective('OPENROUTER_MODEL')?.trim() || 'nvidia/nemotron-3-ultra',
+      model: getEffective('OPENROUTER_MODEL')?.trim() || 'openrouter/free',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: message }

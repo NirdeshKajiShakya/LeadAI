@@ -4,6 +4,7 @@ import { getEffective } from './lib/envConfig.js';
 // Only an explicit opt-in (or the unit-test script) may use RAM storage.
 // Silent fallback is what made every developer's data differ and vanish.
 const memoryAllowed = () => ['true', '1'].includes(process.env.ALLOW_MEMORY_DB) || process.env.NODE_ENV === 'test';
+const CONNECTION_OPTIONS = { serverSelectionTimeoutMS: 5_000, connectTimeoutMS: 5_000 };
 let mode = 'unconfigured';
 let lastError = null;
 
@@ -38,6 +39,64 @@ export function parseDatabaseName(uri) {
   }
 }
 
+export function mongoConnectionDiagnostic(error, uri) {
+  const message = String(error?.message || error || '');
+  const code = String(error?.code ?? error?.cause?.code ?? '');
+  const normalizedMessage = message.toLowerCase();
+  const normalizedCode = code.toUpperCase();
+
+  if (
+    normalizedCode === '18'
+    || normalizedCode === '8000'
+    || normalizedMessage.includes('authentication failed')
+    || normalizedMessage.includes('auth failed')
+    || normalizedMessage.includes('bad auth')
+  ) {
+    return 'MongoDB authentication failed. Check the database username and password in the connection URI.';
+  }
+  if (
+    normalizedCode === 'ENOTFOUND'
+    || normalizedCode === 'ESERVFAIL'
+    || normalizedMessage.includes('querysrv')
+    || (uri.includes('+srv') && /dns|srv|enotfound|eservfail/i.test(message))
+  ) {
+    return 'Could not resolve the MongoDB SRV record. Check the Atlas cluster hostname and verify that this server’s DNS/network permits SRV lookups.';
+  }
+  if (
+    /ip.*(not.*allowed|whitelist|access list)|not in.*access list|whitelist|ip access list/i.test(message)
+  ) {
+    return 'MongoDB rejected this server’s IP address. Add the server IP to the Atlas Network Access allowlist and try again.';
+  }
+  if (/server selection timed out|connection timed out|econnrefused|etimedout/i.test(message)) {
+    return 'MongoDB could not be reached before the connection timed out. Check the network and, for Atlas, confirm this server’s IP is allowed in Network Access.';
+  }
+  return `MongoDB connection failed: ${message || 'unknown connection error'}`;
+}
+
+export async function testMongoConnection(uri) {
+  const normalizedUri = normalizeMongoUri(uri);
+  const connection = mongoose.createConnection(normalizedUri, CONNECTION_OPTIONS);
+  try {
+    await connection.asPromise();
+    await connection.db.admin().command({ ping: 1 });
+  } catch (error) {
+    console.error('[db] MongoDB connection test failed:', {
+      message: error?.message || String(error),
+      code: error?.code ?? error?.cause?.code ?? null
+    });
+    throw new Error(mongoConnectionDiagnostic(error, normalizedUri));
+  } finally {
+    try {
+      await connection.close();
+    } catch (closeError) {
+      console.error('[db] Could not close temporary MongoDB connection:', {
+        message: closeError?.message || String(closeError),
+        code: closeError?.code ?? null
+      });
+    }
+  }
+}
+
 export async function connectDatabase() {
   if (memoryAllowed()) {
     mode = 'memory';
@@ -68,7 +127,7 @@ export async function connectDatabase() {
   mongoose.connection.on('disconnected', () => console.warn('[db] MongoDB disconnected; requests fail until the driver reconnects.'));
   mongoose.connection.on('reconnected', () => console.log('[db] MongoDB reconnected.'));
   try {
-    await mongoose.connect(uri, { serverSelectionTimeoutMS: 10_000, connectTimeoutMS: 10_000 });
+    await mongoose.connect(uri, CONNECTION_OPTIONS);
   } catch (error) {
     lastError = error.message;
     throw new Error('Could not connect to MongoDB database "' + name + '": ' + error.message);
