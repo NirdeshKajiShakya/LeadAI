@@ -7,9 +7,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
-import { User } from '../server/models/User.js';
+import { User, USERNAME_PATTERN, USERNAME_MIN_LENGTH, USERNAME_MAX_LENGTH, normalizeUsername } from '../server/models/User.js';
 import { Task } from '../server/models/Task.js';
 import { Sprint } from '../server/models/Sprint.js';
+import { Board } from '../server/models/Board.js';
 import { connectDatabase, databaseStatus, disconnectDatabase } from '../server/db.js';
 import { endDateForStart, todayIsoDate } from '../server/lib/sprintDates.js';
 
@@ -52,7 +53,8 @@ async function connectOrExit() {
 async function setup() {
   await Promise.all([User.createIndexes(), Task.createIndexes(), Sprint.createIndexes()]);
   console.log('Indexes ensured. Existing data was not modified.\n');
-  return checkIndexes();
+  await checkIndexes();
+  return auditUsernames();
 }
 
 async function checkIndexes() {
@@ -73,6 +75,38 @@ async function checkIndexes() {
   if (missing) throw new Error(`${missing} required index(es) missing. Run "npm run db:setup".`);
 }
 
+// Read-only audit. Legacy accounts may predate the username field (which is
+// optional) but any username that *is* stored must be canonical and unique.
+// Nothing is rewritten here; violations are reported for a human to resolve.
+async function auditUsernames() {
+  const users = await User.find({ username: { $exists: true, $nin: ['', null] } })
+    .select('email username')
+    .lean();
+  const owners = new Map();
+  const duplicates = [];
+  const malformed = [];
+
+  for (const user of users) {
+    const normalized = normalizeUsername(user.username);
+    const invalid = user.username !== normalized
+      || normalized.length < USERNAME_MIN_LENGTH
+      || normalized.length > USERNAME_MAX_LENGTH
+      || !USERNAME_PATTERN.test(normalized);
+    if (invalid) malformed.push(`${user.email} (${JSON.stringify(user.username)})`);
+    const existing = owners.get(normalized);
+    if (existing) duplicates.push(`${existing} and ${user.email} share "${normalized}"`);
+    else owners.set(normalized, user.email);
+  }
+
+  console.log(`\nUsername audit: ${users.length} username(s) set, ${owners.size} unique, ${duplicates.length} duplicate(s), ${malformed.length} malformed.`);
+  for (const entry of duplicates) console.error(`  DUPLICATE  ${entry}`);
+  for (const entry of malformed) console.error(`  MALFORMED  ${entry}`);
+  if (duplicates.length || malformed.length) {
+    throw new Error('Username audit found conflicts. No data was changed; resolve them manually, then run db:check again.');
+  }
+  console.log('Username audit passed. No data was modified.');
+}
+
 async function check() {
   await mongoose.connection.db.admin().ping();
   const status = databaseStatus();
@@ -86,6 +120,7 @@ async function check() {
   }
   console.log('');
   await checkIndexes();
+  await auditUsernames();
 }
 
 async function seed() {
@@ -95,12 +130,19 @@ async function seed() {
   if (!user) fail(`No account exists for ${email}. Sign up in the app first, then rerun the seed.`);
 
   const ownerId = String(user._id);
+  // Seeded work must land on a board the user can actually open; the API only
+  // lists tasks for the current board, so unboarded sample tasks were invisible.
+  let board = await Board.findOne({ $or: [{ ownerId }, { memberIds: ownerId }] }).sort({ createdAt: 1 });
+  if (!board) {
+    board = await new Board({ ownerId, memberIds: [ownerId], name: `${user.name || 'My'}'s board` }).save();
+  }
   const startDate = todayIsoDate();
   const sprint = await Sprint.findOneAndUpdate(
     { ownerId, name: 'Shared Development Baseline' },
-    { $setOnInsert: { goal: 'Shared sample data so every developer sees the same starting point.', startDate, endDate: endDateForStart(startDate), createdAt: new Date() } },
+    { $setOnInsert: { goal: 'Shared sample data so every developer sees the same starting point.', startDate, endDate: endDateForStart(startDate), boardId: board._id, createdAt: new Date() } },
     { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
   );
+  if (!sprint.boardId) await Sprint.updateOne({ _id: sprint._id }, { $set: { boardId: board._id } });
 
   // Keys derive from the account id so two developers can seed the same database safely.
   const prefix = ownerId.slice(-8).toUpperCase();
@@ -117,7 +159,7 @@ async function seed() {
     try {
       const result = await Task.updateOne(
         { key },
-        { $setOnInsert: { key, ownerId, sprintId: sprint._id, comments: [], attachments: [], dependencies: [], dueDate: null, assignee: user.name || 'Unassigned', ...template } },
+        { $setOnInsert: { key, ownerId, boardId: board._id, sprintId: sprint._id, comments: [], attachments: [], dependencies: [], dueDate: null, assignee: user.name || 'Unassigned', ...template } },
         { upsert: true, timestamps: false }
       );
       if (result.upsertedCount) created += 1;
